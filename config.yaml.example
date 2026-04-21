@@ -1,0 +1,37 @@
+# Sorcerer configuration. Copy to config.yaml and fill in for your environment.
+
+# Repos sorcerer may open PRs in and merge to.
+# Every issue's `repos: [...]` must be a subset of this list.
+repos:
+  - github.com/b/sorcerer
+
+# Repos sorcerer may READ during design (architect exploration, decomposition).
+# Superset of `repos`. Bare clones must exist for every entry under repos/<owner>-<repo>.git/.
+explorable_repos:
+  - github.com/b/sorcerer
+
+linear:
+  # Team key from any Linear issue URL: /issue/<TEAM>-<NUM>/...
+  default_team_key: ENG
+  wizard_label: wizard
+
+models:
+  coordinator: claude-sonnet-4-6
+  architect: claude-opus-4-7
+  designer: claude-opus-4-7
+  executor: claude-sonnet-4-6
+  reviewer: claude-opus-4-7
+
+architect:
+  # When to auto-invoke the Tier-1 architect on a request.
+  auto_threshold:
+    min_repos: 3
+    min_issues_estimate: 12
+
+limits:
+  max_concurrent_wizards: 3
+  max_refer_back_cycles: 5
+
+merge:
+  strategy: squash       # squash | merge | rebase
+  delete_branch: true
