@@ -63,6 +63,15 @@ else
   ok "SORCERER_REPO set: $SORCERER_REPO"
 fi
 
+# === /wizard skill ===
+section "/wizard skill"
+WIZARD_SKILL="$HOME/.claude/skills/wizard/SKILL.md"
+if [[ -f "$WIZARD_SKILL" ]]; then
+  ok "/wizard skill installed at $WIZARD_SKILL"
+else
+  no "/wizard skill missing — run 'bash $SORCERER_REPO/scripts/install-skill.sh' (auto-installs from vlad-ko/claude-wizard) or 'curl -sL https://raw.githubusercontent.com/vlad-ko/claude-wizard/main/install.sh | bash'"
+fi
+
 # === Linear MCP ===
 section "Linear MCP"
 if claude mcp list 2>/dev/null | grep -qE 'linear.*✓ Connected'; then

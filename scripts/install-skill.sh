@@ -100,6 +100,37 @@ else
   echo "SORCERER_REPO already exported in $SHELL_ENV"
 fi
 
+# --- 4. Ensure the /wizard skill is installed -------------------------------
+# Sorcerer's implement/feedback prompts reference `~/.claude/skills/wizard/SKILL.md`
+# for TDD and phased methodology. The canonical source is vlad-ko/claude-wizard
+# (MIT licensed). We invoke its upstream install.sh when the skill is missing.
+WIZARD_SKILL="$HOME/.claude/skills/wizard/SKILL.md"
+WIZARD_INSTALL_URL="https://raw.githubusercontent.com/vlad-ko/claude-wizard/main/install.sh"
+
+if [[ -f "$WIZARD_SKILL" ]]; then
+  echo "/wizard skill already installed ($WIZARD_SKILL)"
+else
+  echo "Installing the /wizard skill from vlad-ko/claude-wizard (MIT)..."
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "ERROR: curl is required to auto-install /wizard." >&2
+    echo "       Install curl, or install the skill manually:" >&2
+    echo "       https://github.com/vlad-ko/claude-wizard" >&2
+    exit 1
+  fi
+  if curl -fsSL "$WIZARD_INSTALL_URL" | bash; then
+    if [[ -f "$WIZARD_SKILL" ]]; then
+      echo "/wizard skill installed ($WIZARD_SKILL)"
+    else
+      echo "WARN: upstream installer exited clean but $WIZARD_SKILL is missing." >&2
+      echo "      Re-run manually: curl -sL $WIZARD_INSTALL_URL | bash" >&2
+    fi
+  else
+    echo "ERROR: /wizard skill auto-install failed." >&2
+    echo "       Install manually: curl -sL $WIZARD_INSTALL_URL | bash" >&2
+    exit 1
+  fi
+fi
+
 echo
 echo "In any Claude Code session:  /sorcerer <prompt>"
 echo "(no permission prompts — the submit script is pre-approved)"

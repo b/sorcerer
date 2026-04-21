@@ -185,12 +185,13 @@ Fix anything fatal before starting `/loop`.
 
 ## One-time checklist
 
-- [ ] Install `git`, `claude`, `gh`, `jq`, `curl`, `openssl`, `shellcheck`.
+- [ ] Install `git`, `claude`, `gh`, `jq`, `curl`, `openssl`, `uuidgen`, `shellcheck`.
 - [ ] Confirm Linear MCP connected.
 - [ ] Create a GitHub App with the permissions above; install on every repo in `explorable_repos`; save private key at mode 600.
 - [ ] Export `GH_APP_CLIENT_ID`, `GH_APP_APP_ID`, `GH_APP_PRIVATE_KEY_PATH` in shell profile.
 - [ ] Verify `bash scripts/refresh-token.sh` emits a valid token.
 - [ ] Configure branch protection + auto-merge on every repo in `repos`.
 - [ ] (Recommended) Connect Linear's GitHub integration.
+- [ ] Run `bash scripts/install-skill.sh`. This symlinks the `/sorcerer` skill into `~/.claude/skills/`, pre-approves its Bash invocation, writes `SORCERER_REPO` into `~/.shell_env`, and **auto-installs the `/wizard` skill** from [vlad-ko/claude-wizard](https://github.com/vlad-ko/claude-wizard) (MIT) via its upstream `install.sh`. If `/wizard` is already present, the step is a no-op.
 - [ ] Fill in `<project>/.sorcerer/config.json` (repos, explorable_repos, team key, models, architect thresholds, limits). Auto-bootstrapped on first `/sorcerer` call in a project; edit from the template if you need multi-repo or a non-default Linear team.
-- [ ] `bash scripts/doctor.sh` passes clean (bare clones auto-created on first use; doctor reports pending ones as NOTE).
+- [ ] `bash scripts/doctor.sh` passes clean (bare clones auto-created on first use; doctor reports pending ones as NOTE; `/wizard` skill presence is verified).
