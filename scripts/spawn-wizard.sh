@@ -8,7 +8,7 @@
 #   architect  — Tier-1 architect (requires --request-file)
 #   design     — Tier-2 designer (requires --architect-plan-file and --sub-epic-index)
 #   implement  — Tier-3 issue implementation (requires --issue-meta-file)
-#   feedback   — refer-back addressing (reserved; not yet implemented)
+#   feedback   — refer-back addressing (requires --issue-meta-file with pr_urls + refer_back_cycle)
 #
 # Flags:
 #   --request-file <path>            request markdown (required for architect)
@@ -56,12 +56,7 @@ case "$MODE" in
      exit 2 ;;
 esac
 
-case "$MODE" in
-  feedback)
-    echo "ERROR: mode '$MODE' is reserved but not yet implemented" >&2
-    exit 1
-    ;;
-esac
+# All modes are now live.
 
 REQUEST_FILE=""
 MODEL=""
@@ -108,11 +103,11 @@ if [[ "$MODE" == "design" ]]; then
   [[ -n "$SUB_EPIC_INDEX" ]] || { echo "ERROR: design mode requires --sub-epic-index <int>" >&2; exit 2; }
 fi
 
-if [[ "$MODE" == "implement" ]]; then
-  [[ -n "$ISSUE_META_FILE" ]] || { echo "ERROR: implement mode requires --issue-meta-file <path>" >&2; exit 2; }
+if [[ "$MODE" == "implement" || "$MODE" == "feedback" ]]; then
+  [[ -n "$ISSUE_META_FILE" ]] || { echo "ERROR: $MODE mode requires --issue-meta-file <path>" >&2; exit 2; }
   [[ -f "$ISSUE_META_FILE" ]] || { echo "ERROR: issue meta file not found: $ISSUE_META_FILE" >&2; exit 2; }
-  # Implement mode runs in the issue dir, not the default state/<parent>/<id>/.
-  # The issue dir is the parent of the meta file.
+  # Implement + feedback modes run in the issue dir, not the default state/<parent>/<id>/.
+  # The issue dir is the parent of the meta file; feedback shares state_dir with the implement it follows.
   if [[ -z "$STATE_DIR_OVERRIDE" ]]; then
     STATE_DIR_OVERRIDE="$(cd "$(dirname "$ISSUE_META_FILE")" && pwd)"
   fi
@@ -210,6 +205,16 @@ elif mode == 'implement':
   for k in ('issue_linear_id', 'issue_key', 'branch_name', 'default_branch', 'repos', 'worktree_paths'):
     if k not in meta:
       sys.exit(f"ERROR: meta file missing required field '{k}'")
+    ctx[k] = meta[k]
+  if 'merge_order' in meta:
+    ctx['merge_order'] = meta['merge_order']
+
+elif mode == 'feedback':
+  with open(meta_path) as f:
+    meta = yaml.safe_load(f) or {}
+  for k in ('issue_linear_id', 'issue_key', 'branch_name', 'default_branch', 'repos', 'worktree_paths', 'pr_urls', 'refer_back_cycle'):
+    if k not in meta:
+      sys.exit(f"ERROR: meta file for feedback mode missing required field '{k}'")
     ctx[k] = meta[k]
   if 'merge_order' in meta:
     ctx['merge_order'] = meta['merge_order']
