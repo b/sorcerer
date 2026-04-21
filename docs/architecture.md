@@ -225,7 +225,10 @@ Sorcerer can write to every repo its App installation reaches, every Linear team
 Mitigations, priority order:
 
 1. **Branch protection on every repo in `repos`.** GitHub refuses out-of-rule merges. Primary safety.
-2. **Two-tier repo allowlist.** `repos` (mergeable targets) vs. `explorable_repos` (readable during design; superset). Issues can only declare `repos` from the `repos` list; a design that needs a currently-read-only repo escalates for human approval.
+2. **Two-tier repo allowlist — code-enforced.** `repos` (mergeable targets) vs. `explorable_repos` (readable during design; superset). Three layers of enforcement:
+   - Tick step 9 (`prompts/sorcerer-tick.md`) refuses to spawn an implement wizard when any entry in `issue.repos` is not in `config.repos` — emits an escalation with `rule: issue-repos-outside-allowlist` instead.
+   - `scripts/ensure-bare-clones.sh` (the universal bottleneck for every worktree-hosted push) refuses to clone any spec not in `config.explorable_repos`, so even if the tick guard is bypassed, no writable checkout ever materializes for an out-of-allowlist repo.
+   - GitHub App installation is scoped to the repos in `explorable_repos`; a push to any other repo fails at `gh` layer regardless.
 3. **Scoped GitHub App installation.** App installed only on repos in `explorable_repos`.
 4. **Scoped Linear user.** The MCP-connected user is invited only to relevant teams.
 5. **Secret hygiene.** `.env` and minted token files gitignored; logs redact Bearer tokens; no tokens in process argv.
