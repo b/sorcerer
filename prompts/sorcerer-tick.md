@@ -40,7 +40,7 @@ active_wizards:
   # Implement wizards (mode=implement)
   - id: <uuid>
     mode: implement
-    status: running | awaiting-review | failed
+    status: running | awaiting-review | merging | merged | failed | blocked
     started_at: <ISO-8601>
     designer_id: <parent designer wizard uuid>
     issue_linear_id: <Linear UUID>
@@ -50,6 +50,7 @@ active_wizards:
     worktree_paths: {<owner/repo>: <abs path>}
     pr_urls: {<owner/repo>: <pr url>} | null   # set after implement completes
     state_dir: <issue dir, parent of trees/>
+    review_decision: merge | escalate | null   # set by step 12
     pid: <int or null>
     respawn_count: 0
 ```
@@ -484,13 +485,69 @@ mtime=$(stat -c %Y <state_dir>/heartbeat 2>/dev/null)
     Capture new pid. Append `implement-stale-respawn` event.
   - `respawn_count >= 1`: `status: failed`. Append to `state/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: implement`, `issue_key: <SOR-N>`.
 
-### Step 12 — PR-set review (stub)
+### Step 12 — PR-set review and merge
 
-Emit: `tick: skipped step-12-pr-review — not yet implemented`
+For each `active_wizards` entry with `mode: implement` and `status: awaiting-review`:
 
-### Step 13 — Cleanup merged issues (stub)
+1. **Fetch the PR set.** For each `<repo, pr_url>` in `pr_urls`:
+   ```bash
+   gh pr view "<pr_url>" --json state,mergeable,statusCheckRollup,reviews,comments,files,body,additions,deletions
+   ```
 
-Emit: `tick: skipped step-13-issue-cleanup — not yet implemented`
+2. **Defer if any PR is not yet ready for review.** A PR is "ready" when `state == "OPEN"` and either:
+   - `statusCheckRollup` is empty (no required checks configured), OR
+   - all required checks have completed (any state — we'll judge on it next).
+
+   If any PR is still draft or has pending checks: skip this wizard for this tick (next tick will re-check). Log `tick: deferring review of <issue_key> — PR(s) not ready`.
+
+3. **CI gate.** Are all required checks green on every PR? If any required check failed: this is a refer-back trigger (full refer-back path is slice 10; for slice 9, escalate the wizard with `rule: ci-gate-failed-refer-back-not-yet-implemented`).
+
+4. **Bot gate.** Scan PR comments for unresolved automated-reviewer findings. Heuristic: look for comments from known bot accounts (e.g. `coderabbitai`, `bug-bot`, `dependabot`) where the most recent comment from that bot is not addressed (no follow-up commit since). If any open finding: escalate with `rule: bot-gate-failed-refer-back-not-yet-implemented`. (Slice 9 only handles the all-clean path; slice 10 adds refer-back.)
+
+5. **LLM gate (you, the tick LLM, do this inline).** Fetch the Linear issue: `mcp__plugin_linear_linear__get_issue` with `id=<issue_linear_id>`. Read its description carefully, especially the **Acceptance criteria** section. Then read the PR diffs (from each PR's `files` field, which includes patches). Judge:
+   - Do the changes satisfy every acceptance criterion?
+   - Are there any glaring quality issues (security holes, missing tests, scope creep into repos not in the issue's `repos`, broken existing functionality)?
+   - Is the diff size proportional to what the criteria asked for, or is it suspiciously large or small?
+
+   **Decision:**
+   - **merge** — criteria met, no significant concerns. Proceed to step 6.
+   - **escalate** — high-severity security finding, or `state == "MERGEABLE": false` (conflicts), or anything sorcerer cannot autonomously resolve. Update entry to `status: blocked`, append to `state/escalations.log` with `rule: review-escalation` and a description.
+   - **refer-back** — fixable concerns. **For slice 9 only**, refer-back is treated the same as escalate (with `rule: refer-back-not-yet-implemented`). Slice 10 will add the actual refer-back + feedback wizard path.
+
+6. **Merge action** (only when decision == merge):
+   - For each PR (in `merge_order` if declared, else any order): `gh pr merge <pr_url> --auto --squash --delete-branch`. With auto-merge, the PR merges as soon as conditions are met (no required checks → immediately).
+   - Update entry: `status: merging`, `review_decision: merge`.
+   - Append to `state/events.log`:
+     ```json
+     {"ts":"...","event":"review-merge","id":"<wizard-id>","issue_key":"<SOR-N>","pr_count":<N>}
+     ```
+   - Print to **stdout**: `Reviewed and queued for merge: <issue_key> (<N> PR(s)).`
+
+### Step 13 — Cleanup merged issues
+
+For each `active_wizards` entry with `mode: implement` and `status: merging`:
+
+1. Check each PR's state: `gh pr view <pr_url> --json state` per PR.
+2. If ALL PRs in the set are `MERGED`:
+   - For each repo:
+     ```bash
+     bare="repos/<owner>-<repo>.git"   # convert / to -
+     tree="<state_dir>/trees/<owner>-<repo>"
+     git -C "$bare" worktree remove "$tree" 2>/dev/null || rm -rf "$tree"
+     git -C "$bare" branch -d <branch_name> 2>/dev/null || true
+     ```
+   - Transition Linear issue to `Done` (idempotent — Linear-GitHub integration may have done it):
+     ```
+     mcp__plugin_linear_linear__save_issue with id=<issue_linear_id>, state="Done"
+     ```
+   - Update entry: `status: merged`.
+   - Append to `state/events.log`:
+     ```json
+     {"ts":"...","event":"issue-merged","id":"<wizard-id>","issue_key":"<SOR-N>"}
+     ```
+   - Print to stdout: `Merged and cleaned up: <issue_key>.`
+3. If some PRs merged but some still OPEN after >5 min (compare PR's `updatedAt` or use the `merging` start time): partial-merge state. Append escalation with `rule: partial-merge`. Update status: `blocked`.
+4. If all PRs still OPEN after >5 min: probably required-check failure or branch-protection denied. Append escalation with `rule: merge-blocked`. Update status: `blocked`.
 
 ### Step 14 — Cleanup completed wizards (stub)
 

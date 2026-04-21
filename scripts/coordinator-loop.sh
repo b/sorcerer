@@ -36,15 +36,16 @@ ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 has_in_flight_work() {
   # Returns 0 (true) if there is anything actively progressing OR queued.
-  # Includes awaiting-tier-2 (architect deferred designer spawn) and
-  # awaiting-tier-3 (designer awaiting implement spawn) because the next
-  # tick may need to pick them up. Excludes awaiting-review because slice
-  # 9 (PR review automation) hasn't shipped — once all implements are
-  # awaiting-review the loop should exit and let the user review/merge.
+  # Includes:
+  #   - pending-architect / running / pending-design  — sessions about to start or in progress
+  #   - awaiting-tier-2 / awaiting-tier-3             — deferred spawns at concurrency cap
+  #   - awaiting-review                                — slice 9 step 12 will review on the next tick
+  #   - merging                                        — slice 9 step 13 will detect merge completion on the next tick
+  # Excludes: merged, failed, blocked (terminal — no more progress without user intervention).
   if compgen -G "state/requests/*.md" > /dev/null 2>&1; then
     return 0
   fi
-  if [[ -f state/sorcerer.yaml ]] && grep -qE 'status: (pending-architect|running|awaiting-tier-2|awaiting-tier-3|pending-design)' state/sorcerer.yaml; then
+  if [[ -f state/sorcerer.yaml ]] && grep -qE 'status: (pending-architect|running|awaiting-tier-2|awaiting-tier-3|pending-design|awaiting-review|merging)' state/sorcerer.yaml; then
     return 0
   fi
   return 1
