@@ -6,16 +6,18 @@
 # Modes:
 #   noop       — minimal wizard for spawn-machinery testing. No side effects.
 #   architect  — Tier-1 architect (requires --request-file)
-#   design     — Tier-2 designer (reserved; not yet implemented)
+#   design     — Tier-2 designer (requires --architect-plan-file and --sub-epic-index)
 #   implement  — issue implementation (reserved; not yet implemented)
 #   feedback   — refer-back addressing (reserved; not yet implemented)
 #
 # Flags:
-#   --request-file <path>   request markdown (required for architect)
-#   --model <name>          override the default model (e.g. claude-sonnet-4-6)
-#   --wizard-id <uuid>      use this UUID instead of generating one (lets the
-#                           coordinator pre-create state/<parent>/<id>/ and
-#                           track sessions by a known id)
+#   --request-file <path>            request markdown (required for architect)
+#   --architect-plan-file <path>     architect's plan.yaml (required for design)
+#   --sub-epic-index <int>           which sub-epic in the plan (required for design)
+#   --model <name>                   override the default model (e.g. claude-sonnet-4-6)
+#   --wizard-id <uuid>               use this UUID instead of generating one (lets
+#                                    the coordinator pre-create state/<parent>/<id>/
+#                                    and track sessions by a known id)
 #
 # Runs the wizard synchronously and returns its exit code. Callers that want
 # detached execution should wrap with `nohup ... &` or equivalent — the
@@ -52,7 +54,7 @@ case "$MODE" in
 esac
 
 case "$MODE" in
-  design|implement|feedback)
+  implement|feedback)
     echo "ERROR: mode '$MODE' is reserved but not yet implemented" >&2
     exit 1
     ;;
@@ -61,6 +63,8 @@ esac
 REQUEST_FILE=""
 MODEL=""
 WIZARD_ID_OVERRIDE=""
+ARCHITECT_PLAN_FILE=""
+SUB_EPIC_INDEX=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --request-file)
@@ -72,6 +76,12 @@ while [[ $# -gt 0 ]]; do
     --wizard-id)
       [[ $# -ge 2 ]] || { echo "ERROR: --wizard-id requires a value" >&2; exit 2; }
       WIZARD_ID_OVERRIDE="$2"; shift 2 ;;
+    --architect-plan-file)
+      [[ $# -ge 2 ]] || { echo "ERROR: --architect-plan-file requires a value" >&2; exit 2; }
+      ARCHITECT_PLAN_FILE="$2"; shift 2 ;;
+    --sub-epic-index)
+      [[ $# -ge 2 ]] || { echo "ERROR: --sub-epic-index requires a value" >&2; exit 2; }
+      SUB_EPIC_INDEX="$2"; shift 2 ;;
     *) echo "ERROR: unknown flag $1" >&2; exit 2 ;;
   esac
 done
@@ -79,6 +89,12 @@ done
 if [[ "$MODE" == "architect" ]]; then
   [[ -n "$REQUEST_FILE" ]] || { echo "ERROR: architect mode requires --request-file <path>" >&2; exit 2; }
   [[ -f "$REQUEST_FILE" ]] || { echo "ERROR: request file not found: $REQUEST_FILE" >&2; exit 2; }
+fi
+
+if [[ "$MODE" == "design" ]]; then
+  [[ -n "$ARCHITECT_PLAN_FILE" ]] || { echo "ERROR: design mode requires --architect-plan-file <path>" >&2; exit 2; }
+  [[ -f "$ARCHITECT_PLAN_FILE" ]] || { echo "ERROR: architect plan file not found: $ARCHITECT_PLAN_FILE" >&2; exit 2; }
+  [[ -n "$SUB_EPIC_INDEX" ]] || { echo "ERROR: design mode requires --sub-epic-index <int>" >&2; exit 2; }
 fi
 
 command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 required" >&2; exit 1; }
@@ -107,16 +123,19 @@ ESCALATION_LOG="$REPO_ROOT/state/escalations.log"
 touch "$ESCALATION_LOG"
 
 CONFIG="${SORCERER_CONFIG:-$REPO_ROOT/config.yaml}"
-if [[ "$MODE" == "architect" ]]; then
-  [[ -f "$CONFIG" ]] || { echo "ERROR: architect mode requires config.yaml at $CONFIG" >&2; exit 1; }
+if [[ "$MODE" == "architect" || "$MODE" == "design" ]]; then
+  [[ -f "$CONFIG" ]] || { echo "ERROR: $MODE mode requires config.yaml at $CONFIG" >&2; exit 1; }
 fi
 
 REQUEST_FILE_ABS=""
 [[ -n "$REQUEST_FILE" ]] && REQUEST_FILE_ABS=$(readlink -f "$REQUEST_FILE")
 
-python3 - "$MODE" "$WIZARD_ID" "$HEARTBEAT_FILE" "$ESCALATION_LOG" "$STATE_DIR" "${CONFIG:-/dev/null}" "$REQUEST_FILE_ABS" "$REPO_ROOT" > "$CONTEXT_FILE" <<'PY'
-import sys, yaml
-mode, wizard_id, heartbeat, escalation, state_dir, config_path, request, repo_root = sys.argv[1:9]
+ARCHITECT_PLAN_FILE_ABS=""
+[[ -n "$ARCHITECT_PLAN_FILE" ]] && ARCHITECT_PLAN_FILE_ABS=$(readlink -f "$ARCHITECT_PLAN_FILE")
+
+python3 - "$MODE" "$WIZARD_ID" "$HEARTBEAT_FILE" "$ESCALATION_LOG" "$STATE_DIR" "${CONFIG:-/dev/null}" "$REQUEST_FILE_ABS" "$REPO_ROOT" "$ARCHITECT_PLAN_FILE_ABS" "$SUB_EPIC_INDEX" > "$CONTEXT_FILE" <<'PY'
+import os, sys, yaml
+mode, wizard_id, heartbeat, escalation, state_dir, config_path, request, repo_root, plan_path, sub_epic_index = sys.argv[1:11]
 
 ctx = {
   'wizard_id': wizard_id,
@@ -134,6 +153,27 @@ if mode == 'architect':
   ctx['request_file'] = request
   ctx['explorable_repos'] = cfg.get('explorable_repos') or []
   ctx['repos'] = cfg.get('repos') or []
+  ctx['bare_clones_dir'] = f"{repo_root}/repos"
+
+elif mode == 'design':
+  with open(config_path) as f:
+    cfg = yaml.safe_load(f) or {}
+  with open(plan_path) as f:
+    plan = yaml.safe_load(f) or {}
+  sub_epics = plan.get('sub_epics') or []
+  idx = int(sub_epic_index)
+  if idx < 0 or idx >= len(sub_epics):
+    sys.exit(f"ERROR: sub_epic_index {idx} out of range (plan has {len(sub_epics)} sub-epics)")
+  sub_epic = sub_epics[idx]
+
+  arch_dir = os.path.dirname(plan_path)
+  ctx['max_refer_back_cycles'] = cfg.get('limits', {}).get('max_refer_back_cycles', 5)
+  ctx['scope'] = sub_epic.get('mandate', '')
+  ctx['sub_epic_name'] = sub_epic.get('name', f'sub-epic-{idx}')
+  ctx['architect_plan_file'] = plan_path
+  ctx['request_file'] = os.path.join(arch_dir, 'request.md')
+  ctx['repos'] = sub_epic.get('repos') or []
+  ctx['explorable_repos'] = sub_epic.get('explorable_repos') or []
   ctx['bare_clones_dir'] = f"{repo_root}/repos"
 
 print(yaml.safe_dump(ctx, sort_keys=False, default_flow_style=False), end='')
@@ -178,7 +218,6 @@ SORCERER_CONTEXT_FILE="$CONTEXT_FILE" \
   claude -p \
     --output-format text \
     --permission-mode bypassPermissions \
-    --max-budget-usd 1 \
     "${EXTRA_ARGS[@]}" \
     "$PROMPT" \
   < /dev/null \

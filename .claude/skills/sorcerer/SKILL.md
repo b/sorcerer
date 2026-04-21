@@ -14,11 +14,36 @@ If the request is a minor fix or a tiny one-file change, gently note that sorcer
 
 ## Steps
 
-Do all three Bash steps below, then print the final block. No other output.
+Do all four Bash steps below, then print the final block. No other output.
 
-### 1. Validate
+### 1. Locate the sorcerer repo
 
-Extract the prompt body from the user's message — everything after `/sorcerer ` (or after a `/sorcerer` line, if the user sent a multi-line message). If the prompt body is empty, print:
+This skill is invokable from any directory, so it must find the sorcerer repo via the `$SORCERER_REPO` environment variable.
+
+```bash
+set -e
+if [[ -z "${SORCERER_REPO:-}" ]]; then
+  cat <<EOF
+ERROR: SORCERER_REPO env var is not set.
+
+Set it to the absolute path of your sorcerer repo and re-source your shell:
+  echo 'export SORCERER_REPO=/path/to/sorcerer' >> ~/.shell_env   # or ~/.bashrc / ~/.zshrc
+  source ~/.shell_env
+
+Then re-invoke /sorcerer.
+EOF
+  exit 1
+fi
+if [[ ! -d "$SORCERER_REPO" ]]; then
+  echo "ERROR: SORCERER_REPO points to a non-existent directory: $SORCERER_REPO" >&2
+  exit 1
+fi
+cd "$SORCERER_REPO"
+```
+
+### 2. Validate the prompt
+
+Extract the prompt body from the user's message — everything after `/sorcerer ` (or after a `/sorcerer` line for multi-line input). If the prompt body is empty, print:
 
 ```
 Usage: /sorcerer <description of the system to build or refactor>
@@ -35,15 +60,11 @@ Example:
 
 …and stop. Do not run subsequent steps.
 
-### 2. Write the request
-
-Write the prompt to a timestamped file under `state/requests/`:
+### 3. Write the request
 
 ```bash
-set -e
 mkdir -p state/requests
 TS=$(date -u +%Y%m%dT%H%M%SZ)
-# slug from the first line of the prompt, alphanumeric-and-dash, max 60 chars
 FIRST_LINE='<the prompt's first line, verbatim>'
 SLUG=$(printf '%s' "$FIRST_LINE" | head -c 80 | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | tr -s '-' | sed 's/^-//;s/-$//' | head -c 60 | sed 's/-$//')
 [[ -z "$SLUG" ]] && SLUG=request
@@ -56,7 +77,7 @@ echo "$FILE"
 
 Capture the filename (the script's last `echo`).
 
-### 3. Ensure the coordinator is running
+### 4. Ensure the coordinator is running
 
 ```bash
 bash scripts/start-coordinator.sh
@@ -69,8 +90,8 @@ This is idempotent: if a coordinator is already running it reports the existing 
 Print exactly this block, with the captured values substituted:
 
 ```
-Request submitted: <filename from step 2>
-<output from step 3>
+Request submitted: <filename from step 3>
+<output from step 4>
 
 Sorcerer will autonomously:
   1. Architect — decompose the system into sub-epics with explicit boundaries
@@ -78,8 +99,8 @@ Sorcerer will autonomously:
   3. Implement — spawn wizards to work each issue across the relevant repos
   4. Review — gate every PR set against acceptance criteria, then merge
 
-Monitor:  tail -f state/coordinator.log state/events.log
-Stop:     bash scripts/stop-coordinator.sh
+Monitor:  tail -f $SORCERER_REPO/state/coordinator.log $SORCERER_REPO/state/events.log
+Stop:     bash $SORCERER_REPO/scripts/stop-coordinator.sh
 ```
 
 Don't add commentary, summary of the request, or "let me know if…" lines.
