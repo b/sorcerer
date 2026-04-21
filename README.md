@@ -21,7 +21,9 @@ The coordinator self-exits when there's no pending work, and self-restarts the n
 
 ## Status
 
-Bootstrap complete; pipeline alive end-to-end through Tier-1 (architect). Tier-2 designer wizards, Tier-3 implement wizards, and PR-set review/merge are in progress.
+Full pipeline alive end-to-end: Tier-1 architect → Tier-2 designer → Tier-3 implement → LLM-gated PR-set review → squash merge → cleanup. Cross-epic dependency gating, live event streaming (`/sorcerer attach`), replayable history (`/sorcerer log`), and selective `PushNotification` on milestone events are in. JSON-everywhere, no Python runtime dependency.
+
+See [`STATUS.md`](STATUS.md) for the slice log and the current open work list.
 
 ## Documentation
 
@@ -33,12 +35,23 @@ Read in order:
 
 ## Quick start
 
-1. Complete [`docs/setup.md`](docs/setup.md) — GitHub App, Linear MCP, bare clones, branch protection.
-2. From the sorcerer repo, in Claude Code:
+1. Install CLI prereqs: `git`, `claude` (2.1.1+), `gh` (2.40+), `jq`, `curl`, `openssl`, `uuidgen`, `shellcheck`. No Python needed.
+2. Complete [`docs/setup.md`](docs/setup.md) — GitHub App, Linear MCP, branch protection. Bare clones are auto-created on first use.
+3. Install sorcerer (one-time):
+   ```
+   bash scripts/install-skill.sh
+   ```
+   This symlinks the `/sorcerer` skill into `~/.claude/skills/`, pre-approves its Bash invocation in `~/.claude/settings.json`, writes `SORCERER_REPO` into `~/.shell_env`, and **auto-installs the `/wizard` skill** from [vlad-ko/claude-wizard](https://github.com/vlad-ko/claude-wizard) (MIT) if it's not already present. Sorcerer's implement/feedback wizards invoke `/wizard`'s TDD methodology.
+4. Verify:
+   ```
+   bash scripts/doctor.sh
+   ```
+5. In any Claude Code session, from the project you want sorcerer to work on:
    ```
    /sorcerer <your large-system description>
    ```
-3. Monitor live (streams new events):
+   A `.sorcerer/` directory is auto-bootstrapped in that project on first run.
+6. Monitor live (streams new events):
    ```
    /sorcerer attach
    ```
@@ -46,7 +59,7 @@ Read in order:
    ```
    /sorcerer log
    ```
-4. Stop everything (graceful):
+7. Stop everything (graceful):
    ```
    /sorcerer stop
    ```
