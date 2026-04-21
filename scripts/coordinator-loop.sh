@@ -54,10 +54,14 @@ while true; do
   fi
 
   echo "[$(ts)] running tick"
+  # No --model: use whatever claude's default is (currently opus). The tick
+  # does real judgment work — state-machine routing, PR-set review, failure
+  # classification — so we want the stronger model by default. If an operator
+  # wants to downgrade for cost, they can edit .sorcerer/config.yaml and we'll
+  # honor it in a future slice that reads models.coordinator at tick time.
   if ! claude -p \
       --output-format text \
       --permission-mode bypassPermissions \
-      --model claude-sonnet-4-6 \
       "$TICK_PROMPT" \
       < /dev/null; then
     echo "[$(ts)] tick exited non-zero"

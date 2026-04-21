@@ -131,10 +131,10 @@ linear:
   wizard_label: wizard
 
 models:
-  coordinator: claude-sonnet-4-6
+  coordinator: claude-opus-4-7
   architect: claude-opus-4-7
   designer: claude-opus-4-7
-  executor: claude-sonnet-4-6
+  executor: claude-opus-4-7
   reviewer: claude-opus-4-7
 
 architect:
