@@ -5,7 +5,7 @@
 #
 # The coordinator is a detached bash process running scripts/coordinator-loop.sh
 # with the project root as its first arg. It runs the tick prompt repeatedly via
-# `claude -p` until there is no pending work in <project>/.sorcerer/sorcerer.yaml,
+# `claude -p` until there is no pending work in <project>/.sorcerer/sorcerer.json,
 # then exits cleanly. /sorcerer re-spawns it whenever a new request arrives.
 set -euo pipefail
 

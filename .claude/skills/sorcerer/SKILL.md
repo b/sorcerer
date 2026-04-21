@@ -20,7 +20,7 @@ That one Bash call is the entire skill. Pre-approved in `~/.claude/settings.json
 
 The submit script dispatches on the first word:
 - `stop` → stop the coordinator for the current project
-- `status` → print sorcerer.yaml + coordinator pid state
+- `status` → print sorcerer.json + coordinator pid state
 - `attach` → stream live event updates from a running coordinator
 - `log` → print the full formatted event history for this project
 - anything else → submit as a new request and auto-attach to the live event stream

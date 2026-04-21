@@ -13,23 +13,29 @@ This is a sorcerer-managed session. Rules:
 
 ## Inputs
 
-Read your context file at `$SORCERER_CONTEXT_FILE` (YAML). Required fields:
+Read your context file at `$SORCERER_CONTEXT_FILE` (JSON). Required fields:
 
-```yaml
-wizard_id: <uuid>
-mode: implement
-heartbeat_file: <path>
-escalation_log: <path>
-state_dir: <path>                          # the issue dir, contains trees/, meta.yaml
-issue_linear_id: <Linear UUID>
-issue_key: <SOR-N>
-branch_name: <single name used across every affected repo>
-default_branch: <usually main>
-repos: [<owner/repo>, ...]                 # ≥1; the issue may touch multiple
-worktree_paths:                            # absolute paths; branches pre-checked-out
-  <owner/repo>: <abs path>
-merge_order: [<owner/repo>, ...]           # optional; if present, work + push in this order
+```json
+{
+  "wizard_id": "<uuid>",
+  "mode": "implement",
+  "heartbeat_file": "<path>",
+  "escalation_log": "<path>",
+  "state_dir": "<path>",
+  "issue_linear_id": "<Linear UUID>",
+  "issue_key": "<SOR-N>",
+  "branch_name": "<single name used across every affected repo>",
+  "default_branch": "<usually main>",
+  "repos": ["<owner/repo>"],
+  "worktree_paths": {"<owner/repo>": "<abs path>"},
+  "merge_order": ["<owner/repo>"]
+}
 ```
+
+- `state_dir` is the issue dir; it contains `trees/` and `meta.json`.
+- `repos` has at least one entry — the issue may touch multiple.
+- `worktree_paths` maps each affected repo to an absolute path; the branch is already checked out there.
+- `merge_order` is optional; if present, work + push in that order.
 
 Read the /wizard skill at `~/.claude/skills/wizard/SKILL.md` for the full TDD/phased methodology this work follows. The phases below mirror those.
 
@@ -114,12 +120,16 @@ For EACH repo (in `merge_order` if declared, else any order):
 
 After every repo has a clean PR (no failing required checks, no unresolved bot findings):
 
-1. Atomic write of `<state_dir>/pr_urls.json`:
+1. Atomic write of `<state_dir>/pr_urls.json` via `jq -n` so shell quoting and special characters can't corrupt it:
    ```bash
-   python3 -c "import json,sys; print(json.dumps({...}, indent=2))" > <state_dir>/pr_urls.json.tmp
+   jq -n \
+     --arg r1 "<owner>/<repo-1>" --arg u1 "<pr_url_1>" \
+     --arg r2 "<owner>/<repo-2>" --arg u2 "<pr_url_2>" \
+     '{($r1):$u1, ($r2):$u2}' \
+     > <state_dir>/pr_urls.json.tmp
    mv <state_dir>/pr_urls.json.tmp <state_dir>/pr_urls.json
    ```
-   Schema:
+   Add one `--arg rN ... --arg uN ...` pair per affected repo; adjust the object literal accordingly. Schema:
    ```json
    {
      "<owner>/<repo>": "<pr_url>",

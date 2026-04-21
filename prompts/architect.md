@@ -10,12 +10,12 @@ This is a sorcerer-managed session. Rules:
 
 ## Inputs
 
-Read your context file at `$SORCERER_CONTEXT_FILE` (YAML). Required fields:
+Read your context file at `$SORCERER_CONTEXT_FILE` (JSON). Required fields:
 - `request_file` — path to the user's feature request (markdown)
 - `explorable_repos` — list of repos you may read during planning
 - `repos` — list of repos you may write to (subset of `explorable_repos`; sub-epics' `repos` must be subsets of this)
 - `bare_clones_dir` — directory containing bare clones (`<owner>-<repo>.git/`) for each entry in `explorable_repos`
-- `state_dir` — where you write `design.md` and `plan.yaml`
+- `state_dir` — where you write `design.md` and `plan.json`
 - `heartbeat_file` — touch this between steps
 
 ## Outputs
@@ -27,19 +27,26 @@ Read your context file at `$SORCERER_CONTEXT_FILE` (YAML). Required fields:
    - **Staging order** — declare it if some changes must land before others; otherwise note "no required staging".
    - **Cross-sub-epic contracts** — interfaces, types, invariants that sub-epics must agree on. Empty section if not applicable.
 
-2. `<state_dir>/plan.yaml` — YAML, schema:
-   ```yaml
-   design_doc: design.md
-   sub_epics:
-     - name: <short title>
-       mandate: |
-         <multi-line: what this sub-epic owns, and what it explicitly does NOT own>
-       repos: [<owner/repo>, ...]
-       explorable_repos: [<subset of architect's explorable_repos>]
-       depends_on: [<other sub-epic names>]   # optional, omit if empty. STRICT gate: a sub-epic listed here must be fully merged before the dependent sub-epic's designer can even begin. Only declare a dep when the dependent sub-epic genuinely cannot be designed or implemented without the other's merged code — otherwise it needlessly serializes work.
-   cross_sub_epic_contracts: |
-     <interfaces and invariants sub-epics must honor between each other; empty string if none>
+2. `<state_dir>/plan.json` — JSON, schema:
+   ```json
+   {
+     "design_doc": "design.md",
+     "sub_epics": [
+       {
+         "name": "<short title>",
+         "mandate": "<what this sub-epic owns, and what it explicitly does NOT own; multi-line text uses \\n>",
+         "repos": ["<owner/repo>"],
+         "explorable_repos": ["<subset of architect's explorable_repos>"],
+         "depends_on": ["<other sub-epic names>"]
+       }
+     ],
+     "cross_sub_epic_contracts": "<interfaces and invariants sub-epics must honor between each other; empty string if none>"
+   }
    ```
+
+   Notes on the fields:
+   - `depends_on` is optional — omit the key (or use `[]`) when the sub-epic has no prerequisites. **STRICT gate**: a sub-epic listed here must be fully merged before the dependent sub-epic's designer can even begin. Only declare a dep when the dependent sub-epic genuinely cannot be designed or implemented without the other's merged code — otherwise it needlessly serializes work.
+   - `mandate` and `cross_sub_epic_contracts` are plain JSON strings; encode newlines as `\n` and preserve internal quotes as `\"`. The Write tool handles that escaping for you when you pass the string.
 
 ## Workflow
 
@@ -58,8 +65,8 @@ Read your context file at `$SORCERER_CONTEXT_FILE` (YAML). Required fields:
 5. **Reason about the request.** Identify components involved, which repos host them, dependencies between them, and the natural seams for sub-epic boundaries.
 6. **Touch heartbeat** before writing.
 7. **Write `design.md`** with the five sections above.
-8. **Write `plan.yaml` atomically.** First Write the content to `<state_dir>/plan.yaml.tmp`. Then `bash -c 'mv "<state_dir>/plan.yaml.tmp" "<state_dir>/plan.yaml"'`. The `mv` is the atomic publish: the coordinator's completion detection checks for the canonical `plan.yaml` path, so a partial `.tmp` file never triggers false-completion. If the architect crashes before the `mv`, only `plan.yaml.tmp` exists, and the coordinator correctly treats the run as not-yet-complete.
-9. **Verify outputs:** `bash -c 'test -s <state_dir>/design.md && test -s <state_dir>/plan.yaml'`. If either is missing or empty, print `ARCHITECT_FAILED: outputs missing or empty` and (proceed to step 10 to clean up before exiting).
+8. **Write `plan.json` atomically.** First Write the content to `<state_dir>/plan.json.tmp`. Then `bash -c 'jq . "<state_dir>/plan.json.tmp" > "<state_dir>/plan.json.validated" && mv "<state_dir>/plan.json.validated" "<state_dir>/plan.json" && rm -f "<state_dir>/plan.json.tmp"'`. The `jq .` validates it's proper JSON before publishing; the `mv` is the atomic publish: the coordinator's completion detection checks for the canonical `plan.json` path, so a partial `.tmp` or an invalid file never triggers false-completion. If the architect crashes before the `mv`, only `plan.json.tmp` exists, and the coordinator correctly treats the run as not-yet-complete.
+9. **Verify outputs:** `bash -c 'test -s <state_dir>/design.md && test -s <state_dir>/plan.json && jq -e . <state_dir>/plan.json >/dev/null'`. If either is missing, empty, or the JSON doesn't parse, print `ARCHITECT_FAILED: outputs missing or empty` and (proceed to step 10 to clean up before exiting).
 10. **Clean up scratch worktrees.** Detached worktrees stay registered with their bare clones until explicitly removed; failing to clean them leaves stale entries that will block future `git worktree add` on the same path. For each entry under `<state_dir>/scratch/`:
     ```
     git -C "<bare_clones_dir>/<owner>-<repo>.git" worktree remove "<state_dir>/scratch/<owner>-<repo>"

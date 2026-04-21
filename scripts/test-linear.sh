@@ -3,7 +3,7 @@
 # test issue, read it back, and cancel it. Confirms sorcerer can write to
 # Linear via the MCP tools (not via raw GraphQL).
 #
-# Reads default_team_key from config.yaml. Spawns a headless `claude -p`
+# Reads default_team_key from config.json. Spawns a headless `claude -p`
 # session that follows prompts/test-linear.md and reports a final
 # TEST_PASSED / TEST_FAILED line; this script parses the marker and sets
 # the exit code accordingly.
@@ -17,25 +17,19 @@ if [[ -f "$HOME/.shell_env" ]]; then
   source "$HOME/.shell_env"
 fi
 
-CONFIG="${SORCERER_CONFIG:-$REPO_ROOT/config.yaml}"
+CONFIG="${SORCERER_CONFIG:-$REPO_ROOT/config.json}"
 PROMPT_TEMPLATE="$REPO_ROOT/prompts/test-linear.md"
 
 [[ -f "$CONFIG" ]]          || { echo "ERROR: config file not found at $CONFIG" >&2; exit 1; }
 [[ -f "$PROMPT_TEMPLATE" ]] || { echo "ERROR: prompt template not found at $PROMPT_TEMPLATE" >&2; exit 1; }
-command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 required" >&2; exit 1; }
-command -v claude  >/dev/null 2>&1 || { echo "ERROR: claude CLI required" >&2; exit 1; }
+command -v jq     >/dev/null 2>&1 || { echo "ERROR: jq required" >&2; exit 1; }
+command -v claude >/dev/null 2>&1 || { echo "ERROR: claude CLI required" >&2; exit 1; }
 
-TEAM_KEY=$(python3 - "$CONFIG" <<'PY'
-import sys, yaml
-with open(sys.argv[1]) as f:
-    d = yaml.safe_load(f) or {}
-key = (d.get('linear') or {}).get('default_team_key')
-if not key:
-    sys.exit("linear.default_team_key not set in config.yaml")
-print(key)
-PY
-)
-[[ -n "$TEAM_KEY" ]] || exit 1
+TEAM_KEY=$(jq -r '.linear.default_team_key // ""' "$CONFIG")
+if [[ -z "$TEAM_KEY" ]]; then
+  echo "ERROR: linear.default_team_key not set in $CONFIG" >&2
+  exit 1
+fi
 
 PROMPT="$(sed "s/__TEAM_KEY__/$TEAM_KEY/g" "$PROMPT_TEMPLATE")"
 
@@ -46,7 +40,6 @@ OUTPUT=$(
   claude -p \
     --output-format text \
     --permission-mode bypassPermissions \
-    --max-budget-usd 1 \
     "$PROMPT" \
   2>&1
 )

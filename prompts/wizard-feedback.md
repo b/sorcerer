@@ -12,25 +12,30 @@ This is a sorcerer-managed session. Rules:
 
 ## Inputs
 
-Read your context file at `$SORCERER_CONTEXT_FILE` (YAML). Required fields:
+Read your context file at `$SORCERER_CONTEXT_FILE` (JSON). Required fields:
 
-```yaml
-wizard_id: <uuid>
-mode: feedback
-heartbeat_file: <path>
-escalation_log: <path>
-state_dir: <path>                          # the issue dir, same as original implement
-issue_linear_id: <Linear UUID>
-issue_key: <SOR-N>
-branch_name: <single branch, same as implement>
-default_branch: <usually main>
-repos: [<owner/repo>, ...]
-worktree_paths:                            # absolute paths; worktrees already exist with prior commits
-  <owner/repo>: <abs path>
-pr_urls:                                   # PRs that already exist and need updates
-  <owner/repo>: <pr url>
-refer_back_cycle: <int>                    # 1+; which cycle this is
+```json
+{
+  "wizard_id": "<uuid>",
+  "mode": "feedback",
+  "heartbeat_file": "<path>",
+  "escalation_log": "<path>",
+  "state_dir": "<path>",
+  "issue_linear_id": "<Linear UUID>",
+  "issue_key": "<SOR-N>",
+  "branch_name": "<single branch, same as implement>",
+  "default_branch": "<usually main>",
+  "repos": ["<owner/repo>"],
+  "worktree_paths": {"<owner/repo>": "<abs path>"},
+  "pr_urls": {"<owner/repo>": "<pr url>"},
+  "refer_back_cycle": 1
+}
 ```
+
+- `state_dir` is the same issue dir as the original implement run.
+- `worktree_paths` points at worktrees that already exist with prior commits on `branch_name`.
+- `pr_urls` identifies the existing PRs that need updates — they don't change.
+- `refer_back_cycle` is 1 or higher — which cycle this is.
 
 ## Workflow
 
@@ -78,11 +83,15 @@ refer_back_cycle: <int>                    # 1+; which cycle this is
 
 11. **Transition Linear issue back to `In Review`.** `mcp__plugin_linear_linear__save_issue` with `id=<issue_linear_id>` and `state="In Review"`.
 
-12. **Refresh `<state_dir>/pr_urls.json`.** Same URLs (PRs don't change), but rewrite atomically:
+12. **Refresh `<state_dir>/pr_urls.json`.** Same URLs (PRs don't change), but rewrite atomically via `jq -n`:
     ```bash
-    python3 -c "import json; print(json.dumps({...}, indent=2))" > <state_dir>/pr_urls.json.tmp
+    jq -n \
+      --arg r1 "<owner>/<repo-1>" --arg u1 "<pr_url_1>" \
+      '{($r1):$u1}' \
+      > <state_dir>/pr_urls.json.tmp
     mv <state_dir>/pr_urls.json.tmp <state_dir>/pr_urls.json
     ```
+    Add one `--arg rN ... --arg uN ...` pair per affected repo and extend the object literal to match.
 
 13. **Remove the heartbeat file.**
 

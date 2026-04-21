@@ -9,7 +9,7 @@ At request intake, the coordinator picks the tier:
 - **Small / medium** — skip Tier 1. Invoke Tier 2 directly: one designer wizard, one epic. Default for most requests.
 - **Large / complex** — Tier 1 first (architect), then N Tier-2 designers in parallel (one per sub-epic).
 
-Heuristic (from `config.yaml:architect.auto_threshold`):
+Heuristic (from `config.json:architect.auto_threshold`):
 - Request likely touches ≥ `min_repos` distinct repos *or*
 - Estimated to produce ≥ `min_issues_estimate` issues *or*
 - The user explicitly sets `scale: large` in the request, or invokes `--architect`.
@@ -23,19 +23,22 @@ Users override by adding `scale: small | medium | large` to the top of the reque
 **Inputs**: the feature request, `explorable_repos`, `repos`.
 
 **Outputs**:
-- `state/architects/<id>/design.md` — goals, component map (which repos host which parts of the change), risks and unknowns, staging order, cross-sub-epic contracts and invariants.
-- `state/architects/<id>/plan.yaml` — the sub-epic plan:
-  ```yaml
-  design_doc: design.md
-  sub_epics:
-    - name: <short title>
-      mandate: |
-        <scoped mandate — what this sub-epic owns, and explicitly what it does NOT own>
-      repos: [<subset of architect's repos>]
-      explorable_repos: [<subset of architect's explorable_repos>]
-      depends_on: [<other sub-epic names>]     # optional
-  cross_sub_epic_contracts: |
-    <interfaces and invariants sub-epics must honor between each other>
+- `.sorcerer/architects/<id>/design.md` — goals, component map (which repos host which parts of the change), risks and unknowns, staging order, cross-sub-epic contracts and invariants.
+- `.sorcerer/architects/<id>/plan.json` — the sub-epic plan:
+  ```json
+  {
+    "design_doc": "design.md",
+    "sub_epics": [
+      {
+        "name": "<short title>",
+        "mandate": "<scoped mandate — what this sub-epic owns, and explicitly what it does NOT own; \\n for newlines>",
+        "repos": ["<subset of architect's repos>"],
+        "explorable_repos": ["<subset of architect's explorable_repos>"],
+        "depends_on": ["<other sub-epic names>"]
+      }
+    ],
+    "cross_sub_epic_contracts": "<interfaces and invariants sub-epics must honor between each other>"
+  }
   ```
 
 **Rules**:
@@ -70,13 +73,13 @@ Sub-epic wizards are fully independent processes and can run in parallel if the 
 
 | Artifact | Produced by | Location |
 |---|---|---|
-| Feature request | user | `state/requests/*.md` (moved to architect or wizard dir on intake) |
-| Design doc | architect (Tier 1) | `state/architects/<id>/design.md` |
-| Sub-epic plan | architect (Tier 1) | `state/architects/<id>/plan.yaml` |
+| Feature request | user | `.sorcerer/requests/*.md` (moved to architect or wizard dir on intake) |
+| Design doc | architect (Tier 1) | `.sorcerer/architects/<id>/design.md` |
+| Sub-epic plan | architect (Tier 1) | `.sorcerer/architects/<id>/plan.json` |
 | Epic + issues | designer (Tier 2) | Linear |
-| Wizard manifest | designer (Tier 2) | `state/wizards/<id>/manifest.yaml` |
-| Per-issue meta | coordinator | `state/wizards/<id>/issues/<id>/meta.yaml` |
-| Review history | coordinator | `state/events.log` + PR comments on GitHub |
+| Wizard manifest | designer (Tier 2) | `.sorcerer/wizards/<id>/manifest.json` |
+| Per-issue meta | coordinator | `.sorcerer/wizards/<id>/issues/<id>/meta.json` |
+| Review history | coordinator | `.sorcerer/events.log` + PR comments on GitHub |
 
 ## Anti-patterns
 
@@ -90,6 +93,6 @@ Sub-epic wizards are fully independent processes and can run in parallel if the 
 
 Users can always:
 - Set `scale:` in the request to force or skip Tier 1.
-- Edit `state/architects/<id>/plan.yaml` before Tier-2 spawns (coordinator re-reads on the next tick after the architect exits).
-- Kill a wizard mid-flight via `scripts/stop.sh --wizard <id>`.
-- Reject an architect plan by deleting `plan.yaml` and writing a replacement, or by starting over with an edited request.
+- Edit `.sorcerer/architects/<id>/plan.json` before Tier-2 spawns (coordinator re-reads on the next tick after the architect exits).
+- Stop the coordinator via `/sorcerer stop`.
+- Reject an architect plan by deleting `plan.json` and writing a replacement, or by starting over with an edited request.

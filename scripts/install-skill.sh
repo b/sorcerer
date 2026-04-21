@@ -48,38 +48,32 @@ fi
 ABS_RULE="Bash(bash $REPO_ROOT/scripts/sorcerer-submit.sh:*)"
 ENV_RULE='Bash(bash $SORCERER_REPO/scripts/sorcerer-submit.sh:*)'
 
-python3 - "$SETTINGS" "$ABS_RULE" "$ENV_RULE" <<'PY'
-import json, os, sys
-path, *rules = sys.argv[1:]
-settings = {}
-if os.path.exists(path):
-    try:
-        with open(path) as f:
-            settings = json.load(f)
-    except Exception as e:
-        print(f"WARN: could not parse {path} ({e}); leaving it alone", file=sys.stderr)
-        sys.exit(0)
+command -v jq >/dev/null 2>&1 || { echo "ERROR: jq required for editing $SETTINGS" >&2; exit 1; }
 
-perms = settings.setdefault("permissions", {})
-allow = perms.setdefault("allow", [])
-changed = False
-for rule in rules:
-    if rule not in allow:
-        allow.append(rule)
-        changed = True
+mkdir -p "$(dirname "$SETTINGS")"
 
-if changed:
-    # Write atomically: tmp + rename
-    tmp = path + ".tmp"
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(tmp, "w") as f:
-        json.dump(settings, f, indent=2)
-        f.write("\n")
-    os.rename(tmp, path)
-    print(f"Added /sorcerer allow rules to {path}")
-else:
-    print(f"/sorcerer allow rules already present in {path}")
-PY
+if [[ ! -s "$SETTINGS" ]]; then
+  echo '{}' > "$SETTINGS"
+fi
+
+# Validate the existing file is parseable JSON; if not, leave it alone.
+if ! jq -e . "$SETTINGS" >/dev/null 2>&1; then
+  echo "WARN: could not parse $SETTINGS as JSON; leaving it alone" >&2
+else
+  before=$(jq '(.permissions.allow // []) | length' "$SETTINGS")
+  tmp="$SETTINGS.tmp"
+  jq --arg abs "$ABS_RULE" --arg env "$ENV_RULE" '
+    .permissions = (.permissions // {})
+    | .permissions.allow = ((.permissions.allow // []) + [$abs, $env] | unique)
+  ' "$SETTINGS" > "$tmp"
+  mv "$tmp" "$SETTINGS"
+  after=$(jq '(.permissions.allow // []) | length' "$SETTINGS")
+  if [[ "$before" != "$after" ]]; then
+    echo "Added /sorcerer allow rules to $SETTINGS"
+  else
+    echo "/sorcerer allow rules already present in $SETTINGS"
+  fi
+fi
 
 # --- 3. Export SORCERER_REPO into ~/.shell_env if not already there ---
 # Without this, the /sorcerer skill's `bash $SORCERER_REPO/...` expansion

@@ -15,9 +15,9 @@
 #
 # Flags:
 #   --request-file <path>            request markdown (required for architect)
-#   --architect-plan-file <path>     architect's plan.yaml (required for design)
+#   --architect-plan-file <path>     architect's plan.json (required for design)
 #   --sub-epic-index <int>           which sub-epic in the plan (required for design)
-#   --issue-meta-file <path>         per-issue meta.yaml (required for implement/feedback);
+#   --issue-meta-file <path>         per-issue meta.json (required for implement/feedback);
 #                                    its parent dir is the wizard's state_dir
 #   --state-dir <path>               override the default state_dir computation
 #   --model <name>                   override the default model (claude uses opus by default;
@@ -103,13 +103,14 @@ if [[ "$MODE" == "implement" || "$MODE" == "feedback" ]]; then
   fi
 fi
 
-command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 required" >&2; exit 1; }
-command -v claude  >/dev/null 2>&1 || { echo "ERROR: claude CLI required" >&2; exit 1; }
+command -v jq       >/dev/null 2>&1 || { echo "ERROR: jq required"       >&2; exit 1; }
+command -v uuidgen  >/dev/null 2>&1 || { echo "ERROR: uuidgen required"  >&2; exit 1; }
+command -v claude   >/dev/null 2>&1 || { echo "ERROR: claude CLI required" >&2; exit 1; }
 
 if [[ -n "$WIZARD_ID_OVERRIDE" ]]; then
   WIZARD_ID="$WIZARD_ID_OVERRIDE"
 else
-  WIZARD_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  WIZARD_ID="$(uuidgen)"
 fi
 
 if [[ -n "$STATE_DIR_OVERRIDE" ]]; then
@@ -124,14 +125,14 @@ fi
 mkdir -p "$STATE_DIR/logs"
 mkdir -p "$STATE"
 
-CONTEXT_FILE="$STATE_DIR/context.yaml"
+CONTEXT_FILE="$STATE_DIR/context.json"
 HEARTBEAT_FILE="$STATE_DIR/heartbeat"
 ESCALATION_LOG="$STATE/escalations.log"
 touch "$ESCALATION_LOG"
 
-CONFIG="${SORCERER_CONFIG:-$STATE/config.yaml}"
+CONFIG="${SORCERER_CONFIG:-$STATE/config.json}"
 if [[ "$MODE" == "architect" || "$MODE" == "design" ]]; then
-  [[ -f "$CONFIG" ]] || { echo "ERROR: $MODE mode requires config.yaml at $CONFIG" >&2; exit 1; }
+  [[ -f "$CONFIG" ]] || { echo "ERROR: $MODE mode requires config.json at $CONFIG" >&2; exit 1; }
 fi
 
 REQUEST_FILE_ABS=""
@@ -145,89 +146,151 @@ ISSUE_META_FILE_ABS=""
 
 BARE_CLONES_DIR="$STATE/repos"
 
-python3 - "$MODE" "$WIZARD_ID" "$HEARTBEAT_FILE" "$ESCALATION_LOG" "$STATE_DIR" "${CONFIG:-/dev/null}" "$REQUEST_FILE_ABS" "$BARE_CLONES_DIR" "$ARCHITECT_PLAN_FILE_ABS" "$SUB_EPIC_INDEX" "$ISSUE_META_FILE_ABS" > "$CONTEXT_FILE" <<'PY'
-import os, sys, yaml
-mode, wizard_id, heartbeat, escalation, state_dir, config_path, request, bare_clones_dir, plan_path, sub_epic_index, meta_path = sys.argv[1:12]
+# --- Build context.json per mode -------------------------------------------
+case "$MODE" in
+  noop)
+    jq -n \
+      --arg wizard_id "$WIZARD_ID" \
+      --arg mode "$MODE" \
+      --arg heartbeat_file "$HEARTBEAT_FILE" \
+      --arg escalation_log "$ESCALATION_LOG" \
+      --arg state_dir "$STATE_DIR" \
+      '{wizard_id:$wizard_id, mode:$mode, heartbeat_file:$heartbeat_file, escalation_log:$escalation_log, state_dir:$state_dir, max_refer_back_cycles:5}' \
+      > "$CONTEXT_FILE"
+    ;;
 
-ctx = {
-  'wizard_id': wizard_id,
-  'mode': mode,
-  'heartbeat_file': heartbeat,
-  'escalation_log': escalation,
-  'state_dir': state_dir,
-  'max_refer_back_cycles': 5,
-}
+  architect)
+    MAX_REFER=$(jq '.limits.max_refer_back_cycles // 5' "$CONFIG")
+    jq -n \
+      --arg wizard_id "$WIZARD_ID" \
+      --arg mode "$MODE" \
+      --arg heartbeat_file "$HEARTBEAT_FILE" \
+      --arg escalation_log "$ESCALATION_LOG" \
+      --arg state_dir "$STATE_DIR" \
+      --arg request_file "$REQUEST_FILE_ABS" \
+      --arg bare_clones_dir "$BARE_CLONES_DIR" \
+      --argjson max_refer_back_cycles "$MAX_REFER" \
+      --slurpfile cfg "$CONFIG" \
+      '{
+        wizard_id:$wizard_id, mode:$mode,
+        heartbeat_file:$heartbeat_file, escalation_log:$escalation_log,
+        state_dir:$state_dir, max_refer_back_cycles:$max_refer_back_cycles,
+        request_file:$request_file,
+        explorable_repos: ($cfg[0].explorable_repos // []),
+        repos: ($cfg[0].repos // []),
+        bare_clones_dir:$bare_clones_dir
+      }' \
+      > "$CONTEXT_FILE"
+    ;;
 
-if mode == 'architect':
-  with open(config_path) as f:
-    cfg = yaml.safe_load(f) or {}
-  ctx['max_refer_back_cycles'] = cfg.get('limits', {}).get('max_refer_back_cycles', 5)
-  ctx['request_file'] = request
-  ctx['explorable_repos'] = cfg.get('explorable_repos') or []
-  ctx['repos'] = cfg.get('repos') or []
-  ctx['bare_clones_dir'] = bare_clones_dir
+  design)
+    SUB_EPICS_LEN=$(jq '(.sub_epics // []) | length' "$ARCHITECT_PLAN_FILE")
+    if (( SUB_EPIC_INDEX < 0 || SUB_EPIC_INDEX >= SUB_EPICS_LEN )); then
+      echo "ERROR: sub_epic_index $SUB_EPIC_INDEX out of range (plan has $SUB_EPICS_LEN sub-epics)" >&2
+      exit 1
+    fi
+    ARCH_DIR="$(dirname "$ARCHITECT_PLAN_FILE_ABS")"
+    MAX_REFER=$(jq '.limits.max_refer_back_cycles // 5' "$CONFIG")
+    jq -n \
+      --arg wizard_id "$WIZARD_ID" \
+      --arg mode "$MODE" \
+      --arg heartbeat_file "$HEARTBEAT_FILE" \
+      --arg escalation_log "$ESCALATION_LOG" \
+      --arg state_dir "$STATE_DIR" \
+      --arg architect_plan_file "$ARCHITECT_PLAN_FILE_ABS" \
+      --arg request_file "$ARCH_DIR/request.md" \
+      --arg bare_clones_dir "$BARE_CLONES_DIR" \
+      --argjson sub_epic_index "$SUB_EPIC_INDEX" \
+      --argjson max_refer_back_cycles "$MAX_REFER" \
+      --slurpfile plan "$ARCHITECT_PLAN_FILE" \
+      '
+      ($plan[0].sub_epics[$sub_epic_index]) as $se |
+      {
+        wizard_id:$wizard_id, mode:$mode,
+        heartbeat_file:$heartbeat_file, escalation_log:$escalation_log,
+        state_dir:$state_dir, max_refer_back_cycles:$max_refer_back_cycles,
+        scope: ($se.mandate // ""),
+        sub_epic_name: ($se.name // "sub-epic-\($sub_epic_index)"),
+        architect_plan_file:$architect_plan_file,
+        request_file:$request_file,
+        repos: ($se.repos // []),
+        explorable_repos: ($se.explorable_repos // []),
+        bare_clones_dir:$bare_clones_dir
+      }' \
+      > "$CONTEXT_FILE"
+    ;;
 
-elif mode == 'design':
-  with open(config_path) as f:
-    cfg = yaml.safe_load(f) or {}
-  with open(plan_path) as f:
-    plan = yaml.safe_load(f) or {}
-  sub_epics = plan.get('sub_epics') or []
-  idx = int(sub_epic_index)
-  if idx < 0 or idx >= len(sub_epics):
-    sys.exit(f"ERROR: sub_epic_index {idx} out of range (plan has {len(sub_epics)} sub-epics)")
-  sub_epic = sub_epics[idx]
+  implement)
+    REQUIRED='["issue_linear_id","issue_key","branch_name","default_branch","repos","worktree_paths"]'
+    missing=$(jq -r --argjson req "$REQUIRED" '$req - (keys) | join(", ")' "$ISSUE_META_FILE_ABS")
+    if [[ -n "$missing" ]]; then
+      echo "ERROR: meta file missing required field(s): $missing" >&2
+      exit 1
+    fi
+    jq -n \
+      --arg wizard_id "$WIZARD_ID" \
+      --arg mode "$MODE" \
+      --arg heartbeat_file "$HEARTBEAT_FILE" \
+      --arg escalation_log "$ESCALATION_LOG" \
+      --arg state_dir "$STATE_DIR" \
+      --slurpfile meta "$ISSUE_META_FILE_ABS" \
+      '
+      {
+        wizard_id:$wizard_id, mode:$mode,
+        heartbeat_file:$heartbeat_file, escalation_log:$escalation_log,
+        state_dir:$state_dir, max_refer_back_cycles:5,
+        issue_linear_id: $meta[0].issue_linear_id,
+        issue_key:       $meta[0].issue_key,
+        branch_name:     $meta[0].branch_name,
+        default_branch:  $meta[0].default_branch,
+        repos:           $meta[0].repos,
+        worktree_paths:  $meta[0].worktree_paths
+      }
+      + (if $meta[0].merge_order then {merge_order: $meta[0].merge_order} else {} end)
+      ' \
+      > "$CONTEXT_FILE"
+    ;;
 
-  arch_dir = os.path.dirname(plan_path)
-  ctx['max_refer_back_cycles'] = cfg.get('limits', {}).get('max_refer_back_cycles', 5)
-  ctx['scope'] = sub_epic.get('mandate', '')
-  ctx['sub_epic_name'] = sub_epic.get('name', f'sub-epic-{idx}')
-  ctx['architect_plan_file'] = plan_path
-  ctx['request_file'] = os.path.join(arch_dir, 'request.md')
-  ctx['repos'] = sub_epic.get('repos') or []
-  ctx['explorable_repos'] = sub_epic.get('explorable_repos') or []
-  ctx['bare_clones_dir'] = bare_clones_dir
-
-elif mode == 'implement':
-  with open(meta_path) as f:
-    meta = yaml.safe_load(f) or {}
-  for k in ('issue_linear_id', 'issue_key', 'branch_name', 'default_branch', 'repos', 'worktree_paths'):
-    if k not in meta:
-      sys.exit(f"ERROR: meta file missing required field '{k}'")
-    ctx[k] = meta[k]
-  if 'merge_order' in meta:
-    ctx['merge_order'] = meta['merge_order']
-
-elif mode == 'feedback':
-  with open(meta_path) as f:
-    meta = yaml.safe_load(f) or {}
-  for k in ('issue_linear_id', 'issue_key', 'branch_name', 'default_branch', 'repos', 'worktree_paths', 'pr_urls', 'refer_back_cycle'):
-    if k not in meta:
-      sys.exit(f"ERROR: meta file for feedback mode missing required field '{k}'")
-    ctx[k] = meta[k]
-  if 'merge_order' in meta:
-    ctx['merge_order'] = meta['merge_order']
-
-print(yaml.safe_dump(ctx, sort_keys=False, default_flow_style=False), end='')
-PY
+  feedback)
+    REQUIRED='["issue_linear_id","issue_key","branch_name","default_branch","repos","worktree_paths","pr_urls","refer_back_cycle"]'
+    missing=$(jq -r --argjson req "$REQUIRED" '$req - (keys) | join(", ")' "$ISSUE_META_FILE_ABS")
+    if [[ -n "$missing" ]]; then
+      echo "ERROR: meta file for feedback mode missing required field(s): $missing" >&2
+      exit 1
+    fi
+    jq -n \
+      --arg wizard_id "$WIZARD_ID" \
+      --arg mode "$MODE" \
+      --arg heartbeat_file "$HEARTBEAT_FILE" \
+      --arg escalation_log "$ESCALATION_LOG" \
+      --arg state_dir "$STATE_DIR" \
+      --slurpfile meta "$ISSUE_META_FILE_ABS" \
+      '
+      {
+        wizard_id:$wizard_id, mode:$mode,
+        heartbeat_file:$heartbeat_file, escalation_log:$escalation_log,
+        state_dir:$state_dir, max_refer_back_cycles:5,
+        issue_linear_id:   $meta[0].issue_linear_id,
+        issue_key:         $meta[0].issue_key,
+        branch_name:       $meta[0].branch_name,
+        default_branch:    $meta[0].default_branch,
+        repos:             $meta[0].repos,
+        worktree_paths:    $meta[0].worktree_paths,
+        pr_urls:           $meta[0].pr_urls,
+        refer_back_cycle:  $meta[0].refer_back_cycle
+      }
+      + (if $meta[0].merge_order then {merge_order: $meta[0].merge_order} else {} end)
+      ' \
+      > "$CONTEXT_FILE"
+    ;;
+esac
 
 # For architect and design modes, ensure bare clones exist for every repo the
 # wizard will read (explorable_repos ∪ repos). Implement/feedback modes read
 # from pre-existing worktrees; the coordinator's tick step 9 handles their
 # bare-clone creation before creating the worktree.
 if [[ "$MODE" == "architect" || "$MODE" == "design" ]]; then
-  REPO_LIST="$(python3 - "$CONTEXT_FILE" <<'PY'
-import sys, yaml
-with open(sys.argv[1]) as f:
-    ctx = yaml.safe_load(f) or {}
-repos = list((ctx.get('explorable_repos') or []))
-for r in (ctx.get('repos') or []):
-    if r not in repos:
-        repos.append(r)
-for r in repos:
-    print(r)
-PY
-)"
+  REPO_LIST=$(jq -r '((.explorable_repos // []) + (.repos // [])) | unique | .[]' "$CONTEXT_FILE")
   if [[ -n "$REPO_LIST" ]]; then
     # shellcheck disable=SC2086
     bash "$SORCERER_REPO/scripts/ensure-bare-clones.sh" "$PROJECT_ROOT" $REPO_LIST

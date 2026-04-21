@@ -6,20 +6,20 @@ What sorcerer does, step by step, with decision rules and escalation criteria. M
 
 - **Coordinator** — the Claude Code `/loop` session that is sorcerer itself.
 - **Architect** — a one-shot Tier-1 session for large/complex requests. Produces a design doc and sub-epic plan. See [`design-flow.md`](design-flow.md).
-- **Wizard** — the identity that owns one Linear epic (or sub-epic). Persists as `state/wizards/<id>/`. Not a running process.
+- **Wizard** — the identity that owns one Linear epic (or sub-epic). Persists as `.sorcerer/wizards/<id>/`. Not a running process.
 - **Wizard session** — a single `claude -p` invocation doing one task for a wizard (design, implement-an-issue, address-feedback). Short-lived.
 
 ## Sorcerer tick
 
 One iteration of the coordinator loop. Default pacing: 30s with active work, 5min idle.
 
-1. **Reconcile state.** Read `state/sorcerer.yaml`, every `state/wizards/*/manifest.yaml`, every `state/architects/*/plan.yaml`.
+1. **Reconcile state.** Read `.sorcerer/sorcerer.json`, every `.sorcerer/wizards/*/manifest.json`, every `.sorcerer/architects/*/plan.json`.
 2. **Refresh `$GITHUB_TOKEN` if stale.** <10min remaining → invoke `refresh-token.sh`, update coordinator env. Spawned sessions inherit the fresh token.
-3. **Drain the request queue.** Each file in `state/requests/`: pick the tier.
-   - Large / complex (per `architect.auto_threshold`, or `scale: large` in the request) → move to `state/architects/<id>/request.md`, write `context.yaml` with `mode: architect`, status `pending-architect`.
-   - Otherwise → move to `state/wizards/<id>/request.md`, `mode: design`, status `pending-design`.
+3. **Drain the request queue.** Each file in `.sorcerer/requests/`: pick the tier.
+   - Large / complex (per `architect.auto_threshold`, or `scale: large` in the request) → move to `.sorcerer/architects/<id>/request.md`, write `context.json` with `"mode": "architect"`, status `pending-architect`.
+   - Otherwise → move to `.sorcerer/wizards/<id>/request.md`, `"mode": "design"`, status `pending-design`.
 4. **Spawn architect sessions** for every `pending-architect` run. One at a time if `limits.max_concurrent_wizards == 1`.
-5. **Process architect outputs.** For every architect run whose `plan.yaml` is written and heartbeat absent: read `plan.yaml`; for each sub-epic in it, create a new wizard (`state/wizards/<id>/`) with `mode: design`, `scope` = the sub-epic mandate, `architect_plan_file` pointing at the plan. Status `pending-design`.
+5. **Process architect outputs.** For every architect run whose `plan.json` is written and heartbeat absent: read `plan.json`; for each sub-epic in it, create a new wizard (`.sorcerer/wizards/<id>/`) with `mode: design`, `scope` = the sub-epic mandate, `architect_plan_file` pointing at the plan. Status `pending-design`.
 6. **Spawn designer wizard sessions** for every `pending-design` wizard whose cross-epic deps are satisfied. A sub-epic with `depends_on: [X, Y]` waits until every issue in sub-epic X's and Y's manifests has merged (or been archived). Strict gate: no parallel design across dependent sub-epics. Sub-epics with no deps spawn as concurrency allows.
 7. **Poll Linear** for every active wizard's epic (`mcp__plugin_linear_linear__list_issues` filtered by project). Detect:
    - Issues newly `In Review` with no pending review → queue for step 11.
@@ -36,12 +36,13 @@ One iteration of the coordinator loop. Default pacing: 30s with active work, 5mi
     - **LLM gate**: fetch the Linear issue (`get_issue`); invoke `review-pr.md` with the combined diff + criteria + per-PR check status. Outcome: `merge` / `refer-back` / `escalate`.
     - Act (see § "PR set review decision").
 13. **Clean up merged issues.** For each issue whose full PR set merged this tick, the coordinator (not a wizard) runs per repo:
-    - `git -C repos/<owner>-<repo>.git worktree remove state/wizards/<id>/issues/<issue-id>/trees/<owner>-<repo>`
+    - `git -C repos/<owner>-<repo>.git worktree remove .sorcerer/wizards/<id>/issues/<issue-id>/trees/<owner>-<repo>`
     - `git -C repos/<owner>-<repo>.git branch -d <branch-name>`
-    - Delete `trees/<owner>-<repo>/` on disk; retain `meta.yaml`.
+    - Delete `trees/<owner>-<repo>/` on disk; retain `meta.json`.
+
     - Once every repo is cleaned: transition the Linear issue to `Done` (idempotent with the Linear-GitHub integration).
 14. **Clean up completed wizards.** `cleanup` wizards: verify every worktree/branch is gone in every repo touched, close the Linear epic via MCP, transition to `done`. After 7 days, delete the wizard state dir.
-15. **Persist.** Write `state/sorcerer.yaml`, append to `events.log`. End tick.
+15. **Persist.** Write `.sorcerer/sorcerer.json`, append to `events.log`. End tick.
 
 Ticks are idempotent.
 
@@ -51,7 +52,7 @@ Before every `implement` session (and before the first `feedback` session, thoug
 
 ```
 git -C repos/<owner>-<repo>.git worktree add \
-  ../../state/wizards/<id>/issues/<issue-id>/trees/<owner>-<repo> \
+  ../../.sorcerer/wizards/<id>/issues/<issue-id>/trees/<owner>-<repo> \
   -b <branch-name> \
   origin/<default-branch>
 ```
@@ -65,37 +66,37 @@ Bare clones (one per repo in `explorable_repos`) are a hard precondition. `scrip
 ## Wizard session spawn
 
 ```
-SORCERER_CONTEXT_FILE=state/wizards/<id>/context.yaml \
+SORCERER_CONTEXT_FILE=.sorcerer/wizards/<id>/context.json \
   claude -p "/wizard (sorcerer-managed mode)" \
   --session-id <wizard-id>-<seq> \
   --cwd <working-dir>
 ```
 
-The coordinator rewrites `context.yaml` with the task's fields before each spawn. Schema in [`SORCERER.md`](../../../.claude/skills/wizard/SORCERER.md).
+The coordinator rewrites `context.json` with the task's fields before each spawn. Schema in [`SORCERER.md`](../../../.claude/skills/wizard/SORCERER.md).
 
 `<working-dir>`:
-- **design**: `state/wizards/<id>/`.
-- **implement / feedback**: `state/wizards/<id>/issues/<issue-id>/` (the issue dir; the session `cd`s into `trees/<repo>/` per repo).
+- **design**: `.sorcerer/wizards/<id>/`.
+- **implement / feedback**: `.sorcerer/wizards/<id>/issues/<issue-id>/` (the issue dir; the session `cd`s into `trees/<repo>/` per repo).
 
 Token inheritance: `$GITHUB_TOKEN` from coordinator env.
 
 ## Architect session spawn
 
 ```
-SORCERER_CONTEXT_FILE=state/architects/<id>/context.yaml \
+SORCERER_CONTEXT_FILE=.sorcerer/architects/<id>/context.json \
   claude -p "/wizard (sorcerer-managed mode)" \
   --session-id arch-<id> \
-  --cwd state/architects/<id>
+  --cwd .sorcerer/architects/<id>
 ```
 
-Same schema mechanism; `mode: architect` in the context. Output files: `design.md` and `plan.yaml` in the architect's state dir.
+Same schema mechanism; `mode: architect` in the context. Output files: `design.md` and `plan.json` in the architect's state dir.
 
 ## Wizard lifecycle
 
 ### Design (one session per wizard)
 `mode: design`. First spawn. May be spawned directly from a user request (no architect) or from an architect plan (sub-epic designer — `scope` and `architect_plan_file` set).
 
-1. Read `context.yaml` and the mandate (`request_file`, or if `architect_plan_file` present, read the sub-epic's mandate from the plan plus the architect's `design.md`).
+1. Read `context.json` and the mandate (`request_file`, or if `architect_plan_file` present, read the sub-epic's mandate from the plan plus the architect's `design.md`).
 2. For every repo in `explorable_repos`, check out the default branch from the bare clone into a scratch dir; read `CLAUDE.md` and `docs/`.
 3. `SKILL.md` Phase 2 across the relevant repos.
 4. Decompose into issues. Each issue specifies:
@@ -105,22 +106,28 @@ Same schema mechanism; `mode: architect` in the context. Output files: `design.m
    - Optional `depends_on: [...]` — other Linear issues (within this epic, or from sibling sub-epics if the architect plan declared cross-epic contracts) that must merge first.
 5. Create the Linear project: `mcp__plugin_linear_linear__save_project`.
 6. For each issue: `mcp__plugin_linear_linear__save_issue` with label `wizard:<id>`.
-7. Write `manifest.yaml`:
-   ```yaml
-   epic_linear_id: <id>
-   issues:
-     - linear_id: <id>
-       issue_key: <TEAM-NUM>
-       repos: [<owner/repo>, ...]
-       merge_order: [...]              # optional
-       depends_on: [<linear ids>]      # may cross sub-epics per architect plan
+7. Write `manifest.json`:
+   ```json
+   {
+     "epic_linear_id": "<id>",
+     "issues": [
+       {
+         "linear_id": "<id>",
+         "issue_key": "<TEAM-NUM>",
+         "repos": ["<owner/repo>"],
+         "merge_order": ["<owner/repo>"],
+         "depends_on": ["<linear id or issue key>"]
+       }
+     ]
+   }
    ```
+   `merge_order` and `depends_on` are optional (omit or use `[]` when not applicable). `depends_on` may cross sub-epics per the architect plan.
 8. Remove heartbeat. Exit.
 
 ### Implement (one session per issue, first attempt)
 `mode: implement`. Worktrees pre-created for every repo in `repos`.
 
-1. Read `context.yaml` (includes `worktree_paths: {repo: path}`, `merge_order` if declared).
+1. Read `context.json` (includes `worktree_paths: {repo: path}`, `merge_order` if declared).
 2. Fetch the Linear issue; parse acceptance criteria and repos.
 3. Transition issue to `In Progress`.
 4. `SKILL.md` Phases 1–7 across the affected repos — `cd` between `trees/<repo>/` subdirs as needed. Run each repo's tests in its own tree with its own toolchain.
@@ -135,7 +142,7 @@ Same schema mechanism; `mode: architect` in the context. Output files: `design.m
 ### Feedback (one session per refer-back cycle)
 `mode: feedback`. Worktrees and PRs exist. Coordinator posted a structured review on the primary PR and mirrored a pointer on siblings. Linear issue moved back to `In Progress`.
 
-1. Read `context.yaml` (includes `pr_urls: {repo: url}`, `refer_back_cycle`).
+1. Read `context.json` (includes `pr_urls: {repo: url}`, `refer_back_cycle`).
 2. Fetch the primary review:
    ```
    gh pr view <primary_pr_url> --json comments,reviews,files,statusCheckRollup
@@ -218,19 +225,21 @@ Everything else — transient errors, rebasable conflicts, flaky tests on retry,
 ## Escalation mechanism
 
 - **Preferred**: `PushNotification` to the coordinator's session.
-- **Always**: append a YAML record to `state/escalations.log`:
+- **Always**: append one JSONL record per escalation to `.sorcerer/escalations.log`:
 
-```yaml
-- ts: <ISO-8601>
-  wizard_id: <uuid>                      # or architect id
-  mode: architect | design | implement | feedback | coordinator
-  issue_key: <TEAM-NUM or null>
-  pr_urls: {<owner/repo>: <url>, ...} | null
-  rule: <one of the rules above>
-  attempted: |
-    <what sorcerer tried, chronologically>
-  needs_from_user: |
-    <specific action required to unblock>
+```json
+{
+  "ts": "<ISO-8601>",
+  "wizard_id": "<uuid or architect id>",
+  "mode": "architect | design | implement | feedback | coordinator",
+  "issue_key": "<TEAM-NUM or null>",
+  "pr_urls": {"<owner/repo>": "<url>"},
+  "rule": "<one of the rules above>",
+  "attempted": "<what sorcerer tried, chronologically; \\n for newlines>",
+  "needs_from_user": "<specific action required to unblock; \\n for newlines>"
+}
 ```
+
+Use `jq -nc` to build each line (keeps special characters safe). `jq .` renders a record human-readably if you need to read one.
 
 Users who want external delivery (Slack, email) point their tailer at `escalations.log`.

@@ -5,7 +5,7 @@
 # Usage: scripts/doctor.sh [<project-root>]
 #
 # If <project-root> is omitted, uses cwd. Checks the project's .sorcerer/
-# layout (config.yaml, bare clones, state/ writable) plus user-level
+# layout (config.json, bare clones, state/ writable) plus user-level
 # prerequisites (CLI tools, Linear MCP, GitHub App env, Anthropic CLI).
 set -o pipefail   # intentionally NOT -u: associative arrays misbehave with set -u across empty states
 
@@ -49,7 +49,7 @@ echo "sorcerer doctor for: $PROJECT_ROOT"
 
 # === CLI tools ===
 section "CLI tools"
-for c in git claude gh jq curl openssl python3; do check_cmd "$c"; done
+for c in git claude gh jq curl openssl uuidgen; do check_cmd "$c"; done
 
 # === $SORCERER_REPO ===
 section "SORCERER_REPO"
@@ -119,25 +119,15 @@ fi
 # === Per-project configuration ===
 section "Project config"
 REPOS=""; EXPLORABLE=""
-if [[ ! -f "$STATE/config.yaml" ]]; then
-  warn "$STATE/config.yaml not present — will be auto-bootstrapped on first /sorcerer invocation in this project"
+if [[ ! -f "$STATE/config.json" ]]; then
+  warn "$STATE/config.json not present — will be auto-bootstrapped on first /sorcerer invocation in this project"
 else
-  ok "$STATE/config.yaml present"
-  if command -v python3 >/dev/null 2>&1; then
-    REPOS=$(python3 - "$STATE/config.yaml" <<'PY'
-import sys, yaml
-d = yaml.safe_load(open(sys.argv[1])) or {}
-for r in d.get('repos') or []:
-    print(r)
-PY
-)
-    EXPLORABLE=$(python3 - "$STATE/config.yaml" <<'PY'
-import sys, yaml
-d = yaml.safe_load(open(sys.argv[1])) or {}
-for r in d.get('explorable_repos') or []:
-    print(r)
-PY
-)
+  if jq -e . "$STATE/config.json" >/dev/null 2>&1; then
+    ok "$STATE/config.json present"
+    REPOS=$(jq -r '(.repos // [])[]' "$STATE/config.json")
+    EXPLORABLE=$(jq -r '(.explorable_repos // [])[]' "$STATE/config.json")
+  else
+    no "$STATE/config.json is not valid JSON"
   fi
 fi
 
@@ -157,7 +147,7 @@ if [[ -n "$EXPLORABLE" ]]; then
     fi
   done <<<"$EXPLORABLE"
 else
-  warn "no explorable_repos yet (config.yaml missing or empty)"
+  warn "no explorable_repos yet (config.json missing or empty)"
 fi
 
 # === Repo access via App token ===
@@ -175,7 +165,7 @@ if [[ -n "${GITHUB_TOKEN:-}" && -n "$REPOS" ]]; then
     fi
   done <<<"$REPOS"
 else
-  warn "skipped — need both a valid GITHUB_TOKEN and a repos list in config.yaml"
+  warn "skipped — need both a valid GITHUB_TOKEN and a repos list in config.json"
 fi
 
 # === Branch protection + auto-merge on each target repo ===
@@ -211,7 +201,7 @@ if [[ ${#REPO_INFO[@]} -gt 0 ]]; then
     fi
   done
 else
-  warn "skipped — no accessible repo from config.yaml"
+  warn "skipped — no accessible repo from config.json"
 fi
 
 # === State + space ===
