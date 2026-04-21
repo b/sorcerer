@@ -183,6 +183,24 @@ Fails on:
 
 Fix anything fatal before starting `/loop`.
 
+## Reducing merge conflicts on shared docs
+
+Sorcerer can run many wizards in parallel; each opens a PR against the same default branch. Shared append-only docs (STATUS.md, CHANGELOG.md, a progress roadmap, `.gitattributes` itself) tend to cause conflicts when two wizards append at the end.
+
+Sorcerer handles real conflicts automatically: tick step 12 detects `mergeable == CONFLICTING` or `mergeStateStatus in [BEHIND, DIRTY]`, spawns a `rebase` wizard that rebases onto the current default branch and resolves conflicts in each affected repo, and re-queues the PR set for review. Works for both text-additive docs (keep both sides) and code conflicts (re-apply wizard intent on top of upstream).
+
+For files where "both sides win" is almost always the right answer, you can skip the rebase cycle entirely by declaring a union merge in the repo's `.gitattributes`:
+
+```gitattributes
+STATUS.md         merge=union
+CHANGELOG.md      merge=union
+docs/roadmap.md   merge=union
+```
+
+`merge=union` tells git to auto-resolve the conflict by keeping BOTH sides of each hunk, preserving both additions. Only use it on files where the semantics are additive and line-order doesn't encode meaning — it is a LOSSY strategy for structured content (think JSON, YAML, code).
+
+For structured files (config, code, anything parsed), leave the default merge driver and let sorcerer's rebase wizard handle it.
+
 ## One-time checklist
 
 - [ ] Install `git`, `claude`, `gh`, `jq`, `curl`, `openssl`, `uuidgen`, `shellcheck`.

@@ -37,6 +37,10 @@ jq -r '
       "Review passed; merging \(.issue_key) (\(.pr_count) PR(s))"
     elif $e == "review-refer-back" then
       "Refer-back (cycle \(.cycle)): \(.issue_key) — see \(.primary_pr)"
+    elif $e == "review-rebase" then
+      "Rebase needed (cycle \(.cycle)): \(.issue_key) — \((.offending_repos // []) | join(", "))"
+    elif $e == "rebase-completed" then
+      "Rebase cycle \(.cycle) done on \(.issue_key); re-queueing for review"
     elif $e == "issue-merged" then
       "Merged and cleaned up: \(.issue_key)"
     elif $e == "wizard-archived" then

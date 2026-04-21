@@ -196,12 +196,23 @@ On every sibling PR, mirror a short pointer: "See <primary-pr-url> for review."
 
 **Action:** transition the Linear issue back to `In Progress`. Next tick spawns a `feedback` session with the full `pr_urls` map in context.
 
+### `rebase` (pre-empts the other decisions when it fires)
+Any PR in the set has `mergeable == CONFLICTING` or `mergeStateStatus in [BEHIND, DIRTY]`. The branch is out of date with main or has real conflicts. A review of stale/conflicting code would be noise, so rebase first.
+
+**Action:** spawn a `rebase` wizard (`prompts/wizard-rebase.md`) with the PR set in context. It fetches origin, rebases the branch onto the default branch in each affected repo, resolves conflicts (text-additive docs: keep both sides; code: re-apply wizard intent on upstream), re-runs tests, and force-pushes with `--force-with-lease`. Next tick re-enters step 12 against the rebased PR set.
+
+Capped at `max_refer_back_cycles` rebase attempts (shared counter, tracked as `conflict_cycle` on the wizard entry). Cap reached → escalate with `rule: conflict-cap-reached`.
+
+**Reducing rebase frequency.** For append-only docs (`STATUS.md`, `CHANGELOG.md`, etc.) where both sides of a conflict should always be kept, declare `merge=union` in the repo's `.gitattributes`. Git auto-resolves those hunks, sorcerer never sees the conflict. See [`setup.md`](setup.md) § "Reducing merge conflicts on shared docs".
+
 ### `escalate`
 Any of:
 - `refer_back_cycle >= max_refer_back_cycles` with concerns remaining.
+- `conflict_cycle >= max_refer_back_cycles` with PR still unmergeable.
 - LLM review returns `severity: high` + category `security` anywhere in the set.
 - `gh pr merge` returns 422 on any PR with every required check green.
 - Partial serial merge — steps 1..N-1 merged, step N failed.
+- Rebase wizard self-reports `REBASE_FAILED` (unresolvable semantic conflict).
 
 **Action:** escalation record; wizard `blocked` on this issue. Other issues (and other wizards) continue.
 

@@ -12,6 +12,7 @@
 #   design     — Tier-2 designer (requires --architect-plan-file and --sub-epic-index)
 #   implement  — Tier-3 issue implementation (requires --issue-meta-file)
 #   feedback   — refer-back addressing (requires --issue-meta-file with pr_urls + refer_back_cycle)
+#   rebase     — merge-conflict / branch-behind resolution (requires --issue-meta-file with pr_urls + conflict_cycle)
 #
 # Flags:
 #   --request-file <path>            request markdown (required for architect)
@@ -44,9 +45,9 @@ fi
 MODE="${1:-}"
 shift || true
 case "$MODE" in
-  noop|architect|design|implement|feedback) ;;
+  noop|architect|design|implement|feedback|rebase) ;;
   *) echo "Usage: $0 <mode> [options]" >&2
-     echo "Modes: noop, architect, design, implement, feedback" >&2
+     echo "Modes: noop, architect, design, implement, feedback, rebase" >&2
      exit 2 ;;
 esac
 
@@ -95,7 +96,7 @@ if [[ "$MODE" == "design" ]]; then
   [[ -n "$SUB_EPIC_INDEX" ]] || { echo "ERROR: design mode requires --sub-epic-index <int>" >&2; exit 2; }
 fi
 
-if [[ "$MODE" == "implement" || "$MODE" == "feedback" ]]; then
+if [[ "$MODE" == "implement" || "$MODE" == "feedback" || "$MODE" == "rebase" ]]; then
   [[ -n "$ISSUE_META_FILE" ]] || { echo "ERROR: $MODE mode requires --issue-meta-file <path>" >&2; exit 2; }
   [[ -f "$ISSUE_META_FILE" ]] || { echo "ERROR: issue meta file not found: $ISSUE_META_FILE" >&2; exit 2; }
   if [[ -z "$STATE_DIR_OVERRIDE" ]]; then
@@ -283,6 +284,38 @@ case "$MODE" in
       ' \
       > "$CONTEXT_FILE"
     ;;
+
+  rebase)
+    REQUIRED='["issue_linear_id","issue_key","branch_name","default_branch","repos","worktree_paths","pr_urls","conflict_cycle"]'
+    missing=$(jq -r --argjson req "$REQUIRED" '$req - (keys) | join(", ")' "$ISSUE_META_FILE_ABS")
+    if [[ -n "$missing" ]]; then
+      echo "ERROR: meta file for rebase mode missing required field(s): $missing" >&2
+      exit 1
+    fi
+    jq -n \
+      --arg wizard_id "$WIZARD_ID" \
+      --arg mode "$MODE" \
+      --arg heartbeat_file "$HEARTBEAT_FILE" \
+      --arg escalation_log "$ESCALATION_LOG" \
+      --arg state_dir "$STATE_DIR" \
+      --slurpfile meta "$ISSUE_META_FILE_ABS" \
+      '
+      {
+        wizard_id:$wizard_id, mode:$mode,
+        heartbeat_file:$heartbeat_file, escalation_log:$escalation_log,
+        state_dir:$state_dir,
+        issue_linear_id:  $meta[0].issue_linear_id,
+        issue_key:        $meta[0].issue_key,
+        branch_name:      $meta[0].branch_name,
+        default_branch:   $meta[0].default_branch,
+        repos:            $meta[0].repos,
+        worktree_paths:   $meta[0].worktree_paths,
+        pr_urls:          $meta[0].pr_urls,
+        conflict_cycle:   $meta[0].conflict_cycle
+      }
+      ' \
+      > "$CONTEXT_FILE"
+    ;;
 esac
 
 # For architect and design modes, ensure bare clones exist for every repo the
@@ -303,6 +336,7 @@ case "$MODE" in
   design)    PROMPT_FILE="$SORCERER_REPO/prompts/wizard-design.md" ;;
   implement) PROMPT_FILE="$SORCERER_REPO/prompts/wizard-implement.md" ;;
   feedback)  PROMPT_FILE="$SORCERER_REPO/prompts/wizard-feedback.md" ;;
+  rebase)    PROMPT_FILE="$SORCERER_REPO/prompts/wizard-rebase.md" ;;
 esac
 [[ -f "$PROMPT_FILE" ]] || { echo "ERROR: missing prompt file $PROMPT_FILE" >&2; exit 1; }
 
