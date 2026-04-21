@@ -58,7 +58,7 @@ Read your context file at `$SORCERER_CONTEXT_FILE` (YAML). Required fields:
 5. **Reason about the request.** Identify components involved, which repos host them, dependencies between them, and the natural seams for sub-epic boundaries.
 6. **Touch heartbeat** before writing.
 7. **Write `design.md`** with the five sections above.
-8. **Write `plan.yaml`** per the schema above.
+8. **Write `plan.yaml` atomically.** First Write the content to `<state_dir>/plan.yaml.tmp`. Then `bash -c 'mv "<state_dir>/plan.yaml.tmp" "<state_dir>/plan.yaml"'`. The `mv` is the atomic publish: the coordinator's completion detection checks for the canonical `plan.yaml` path, so a partial `.tmp` file never triggers false-completion. If the architect crashes before the `mv`, only `plan.yaml.tmp` exists, and the coordinator correctly treats the run as not-yet-complete.
 9. **Verify outputs:** `bash -c 'test -s <state_dir>/design.md && test -s <state_dir>/plan.yaml'`. If either is missing or empty, print `ARCHITECT_FAILED: outputs missing or empty` and (proceed to step 10 to clean up before exiting).
 10. **Clean up scratch worktrees.** Detached worktrees stay registered with their bare clones until explicitly removed; failing to clean them leaves stale entries that will block future `git worktree add` on the same path. For each entry under `<state_dir>/scratch/`:
     ```
