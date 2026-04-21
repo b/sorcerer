@@ -284,14 +284,15 @@ For each `active_wizards` entry with `mode: implement` (covers both initial impl
 test -f <state_dir>/heartbeat && hb=present || hb=absent
 test -f <state_dir>/pr_urls.json && pr=present || pr=absent
 # Determine which spawn is running by reading the most recent log file's last line.
-# Logs: logs/spawn.txt for initial implement; logs/feedback-<N>.txt for feedback cycle N.
+# Logs: logs/spawn.txt for initial implement; logs/feedback-<N>.txt for feedback cycle N;
+# logs/rebase-<N>.txt for rebase cycle N.
 latest_log=$(ls -t <state_dir>/logs/*.txt 2>/dev/null | head -1)
 last_line=$(tail -1 "$latest_log" 2>/dev/null)
 ```
 
 Cases:
 - `hb=absent` AND `pr=present` AND `last_line` starts with `IMPLEMENT_OK` or `FEEDBACK_OK`:
-  - **Completed successfully.**
+  - **Implement/feedback completed successfully.**
   - Read `<state_dir>/pr_urls.json`.
   - Print to **stdout**:
     ```
@@ -304,11 +305,19 @@ Cases:
     {"ts":"...","event":"implement-completed"|"feedback-completed","id":"<id>","issue_key":"<SOR-N>","pr_count":<N>,"cycle":<N or null>}
     ```
   - Update entry: `status: awaiting-review`, `pr_urls: <map>`.
-- `hb=absent` AND `last_line` starts with `IMPLEMENT_FAILED` or `FEEDBACK_FAILED`:
-  - Wizard reported its own failure. Update `status: failed`. Append to `.sorcerer/escalations.log` with `rule: <implement|feedback>-self-reported-failure`, include the wizard's failure reason.
+- `hb=absent` AND `last_line` starts with `REBASE_OK`:
+  - **Rebase completed successfully.** No pr_urls.json changes (rebase doesn't write it — same PRs, same URLs).
+  - Print to **stdout**: `Rebase <wizard-id> completed (<issue_key>, cycle <N>). Re-queueing for review.`
+  - Append event:
+    ```json
+    {"ts":"...","event":"rebase-completed","id":"<id>","issue_key":"<SOR-N>","cycle":<N>}
+    ```
+  - Update entry: `status: awaiting-review` (step 12 will re-evaluate the PR set next tick). Leave `pr_urls` as-is.
+- `hb=absent` AND `last_line` starts with `IMPLEMENT_FAILED`, `FEEDBACK_FAILED`, or `REBASE_FAILED`:
+  - Wizard reported its own failure. Update `status: failed`. Append to `.sorcerer/escalations.log` with `rule: <implement|feedback|rebase>-self-reported-failure`, include the wizard's failure reason.
 - `hb=absent` AND `pr=absent` AND no completion marker in log:
   - If `now - started_at < 30s`, too early — skip.
-  - Otherwise: crashed without writing output. `status: failed`. Append to `.sorcerer/escalations.log` with `rule: implement-no-output` (or `feedback-no-output`).
+  - Otherwise: crashed without writing output. `status: failed`. Append to `.sorcerer/escalations.log` with `rule: implement-no-output` (or `feedback-no-output`, `rebase-no-output`).
 - `pr=present, hb=present` — wizard mid-write; wait for next tick.
 - `hb=present` — wizard still working; step 11c handles staleness.
 
@@ -578,7 +587,7 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
 
 1. **Fetch the PR set.** For each `<repo, pr_url>` in `pr_urls`:
    ```bash
-   gh pr view "<pr_url>" --json state,mergeable,statusCheckRollup,reviews,comments,files,body,additions,deletions
+   gh pr view "<pr_url>" --json state,mergeable,mergeStateStatus,statusCheckRollup,reviews,comments,files,body,additions,deletions
    ```
 
 2. **Defer if any PR is not yet ready for review.** A PR is "ready" when `state == "OPEN"` and either:
@@ -587,11 +596,15 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
 
    If any PR is still draft or has pending checks: skip this wizard for this tick (next tick will re-check). Log `tick: deferring review of <issue_key> — PR(s) not ready`.
 
-3. **CI gate.** Are all required checks green on every PR? If any required check failed: this is a refer-back trigger (full refer-back path is slice 10; for slice 9, escalate the wizard with `rule: ci-gate-failed-refer-back-not-yet-implemented`).
+3. **Merge-readiness gate (new — pre-empts the other gates when it fails).** If ANY PR in the set has `mergeable == "CONFLICTING"` or `mergeStateStatus` in `["BEHIND", "DIRTY"]`:
+   - This is a rebase situation, not a review situation. Proceed to step 6c (rebase path) — do NOT run CI/bot/LLM gates against a branch that's behind main, it'll just produce noise.
+   - Exception: if the wizard's `conflict_cycle >= max_refer_back_cycles` (reusing the same cap), skip the rebase path and escalate with `rule: conflict-cap-reached`. The default cap is 5 rebase attempts.
 
-4. **Bot gate.** Scan PR comments for unresolved automated-reviewer findings. Heuristic: look for comments from known bot accounts (e.g. `coderabbitai`, `bug-bot`, `dependabot`) where the most recent comment from that bot is not addressed (no follow-up commit since). If any open finding: escalate with `rule: bot-gate-failed-refer-back-not-yet-implemented`. (Slice 9 only handles the all-clean path; slice 10 adds refer-back.)
+4. **CI gate.** Are all required checks green on every PR? If any required check failed: this is a refer-back trigger (full refer-back path is slice 10; for slice 9, escalate the wizard with `rule: ci-gate-failed-refer-back-not-yet-implemented`).
 
-5. **LLM gate (you, the tick LLM, do this inline).** Fetch the Linear issue: `mcp__plugin_linear_linear__get_issue` with `id=<issue_linear_id>`. Read its description carefully, especially the **Acceptance criteria** section. Then read the PR diffs (from each PR's `files` field, which includes patches). Judge:
+5. **Bot gate.** Scan PR comments for unresolved automated-reviewer findings. Heuristic: look for comments from known bot accounts (e.g. `coderabbitai`, `bug-bot`, `dependabot`) where the most recent comment from that bot is not addressed (no follow-up commit since). If any open finding: escalate with `rule: bot-gate-failed-refer-back-not-yet-implemented`. (Slice 9 only handles the all-clean path; slice 10 adds refer-back.)
+
+6. **LLM gate (you, the tick LLM, do this inline).** Fetch the Linear issue: `mcp__plugin_linear_linear__get_issue` with `id=<issue_linear_id>`. Read its description carefully, especially the **Acceptance criteria** section. Then read the PR diffs (from each PR's `files` field, which includes patches). Judge:
    - Do the changes satisfy every acceptance criterion?
    - Are there any glaring quality issues (security holes, missing tests, scope creep into repos not in the issue's `repos`, broken existing functionality)?
    - Is the diff size proportional to what the criteria asked for, or is it suspiciously large or small?
@@ -599,7 +612,7 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
    **Decision:**
    - **merge** — criteria met, no significant concerns. Proceed to step 6a.
    - **refer-back** — fixable concerns (missing test, minor bug, style issue, etc.). Proceed to step 6b.
-   - **escalate** — high-severity security finding, `mergeable == CONFLICTING`, or anything sorcerer cannot autonomously resolve. Update entry to `status: blocked`, append to `.sorcerer/escalations.log` with `rule: review-escalation` and a description. Also escalate if `refer_back_cycle >= max_refer_back_cycles` (hard cap from `config.json:limits.max_refer_back_cycles`, default 5).
+   - **escalate** — high-severity security finding, or anything sorcerer cannot autonomously resolve. Update entry to `status: blocked`, append to `.sorcerer/escalations.log` with `rule: review-escalation` and a description. Also escalate if `refer_back_cycle >= max_refer_back_cycles` (hard cap from `config.json:limits.max_refer_back_cycles`, default 5). Note: `CONFLICTING` / `BEHIND` no longer escalates — step 3 routes those to 6c (rebase) first.
 
 6a. **Merge action** (only when decision == merge):
    - For each PR (in `merge_order` if declared, else any order): `gh pr merge <pr_url> --auto --squash --delete-branch`. With auto-merge, the PR merges as soon as conditions are met (no required checks → immediately).
@@ -658,6 +671,34 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
      {"ts":"...","event":"review-refer-back","id":"<wizard-id>","issue_key":"<SOR-N>","cycle":<N>,"primary_pr":"<url>"}
      ```
    - Print to **stdout**: `Referred back: <issue_key> (cycle <N>). Feedback wizard spawned.`
+
+6c. **Rebase action** (only when step 3 flagged `CONFLICTING` / `BEHIND` / `DIRTY`):
+   - Increment `conflict_cycle` on the entry (initialize to 0 if absent, so first conflict sets it to 1).
+   - Check the cap: if `conflict_cycle > max_refer_back_cycles`, treat as escalate (rule: `conflict-cap-reached`). Otherwise continue.
+   - **Update `<state_dir>/meta.json`** — add `pr_urls` + `conflict_cycle` fields so the rebase wizard's context-builder has them:
+     ```bash
+     jq --argjson pr_urls '<pr_urls JSON object>' --argjson cycle <N> \
+        '. + {pr_urls: $pr_urls, conflict_cycle: $cycle}' \
+        <state_dir>/meta.json > <state_dir>/meta.json.tmp \
+       && mv <state_dir>/meta.json.tmp <state_dir>/meta.json
+     ```
+   - **Spawn the rebase wizard** (detached):
+     ```bash
+     nohup bash scripts/spawn-wizard.sh rebase \
+       --wizard-id <wizard-id-same-as-implement> \
+       --issue-meta-file <state_dir>/meta.json \
+       > <state_dir>/logs/rebase-<N>.txt 2>&1 &
+     echo $!
+     ```
+     Note: reuses the same wizard-id as the implement wizard (single active_wizards entry per issue; status tracks phase).
+   - Update entry: `status: running`, `review_decision: null`, `pid: <new pid>`. Touch the wizard's heartbeat timer (reset).
+   - Append to `.sorcerer/events.log`:
+     ```json
+     {"ts":"...","event":"review-rebase","id":"<wizard-id>","issue_key":"<SOR-N>","cycle":<N>,"offending_repos":["<repo>"]}
+     ```
+   - Print to **stdout**: `Rebase needed: <issue_key> (cycle <N>). Rebase wizard spawned for <N> repo(s).`
+
+**Step 5c reminder.** When the rebase wizard exits, step 5c (implement/feedback/rebase completion detection) handles it with the same pattern as feedback. `REBASE_OK` in the latest log → transition back to `awaiting-review` for step 12 to re-try. `REBASE_FAILED` → escalate with `rule: rebase-self-reported-failure`. The completion detection's log-tail inspection already covers `logs/rebase-<N>.txt` via its `ls -t <state_dir>/logs/*.txt` pattern.
 
 ### Step 13 — Cleanup merged issues
 
