@@ -18,6 +18,7 @@ PROJECT_ROOT="${1:-$(pwd)}"
 STATE="$PROJECT_ROOT/.sorcerer"
 EVENTS="$STATE/events.log"
 PID_FILE="$STATE/coordinator.pid"
+ATTACH_PID_FILE="$STATE/attach.pid"
 
 if [[ ! -f "$PID_FILE" ]]; then
   echo "No coordinator running for $PROJECT_ROOT."
@@ -30,6 +31,26 @@ if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
   echo "Coordinator is not alive (stale pid: $pid). Submit new work with /sorcerer <prompt> to respawn."
   exit 0
 fi
+
+# If a previous attach is still running for this project, kill it before
+# taking over. Claude Code backgrounds interrupted Bash calls; without this
+# cleanup, every detach+reattach cycle leaves an orphan tail process behind.
+if [[ -f "$ATTACH_PID_FILE" ]]; then
+  prev="$(cat "$ATTACH_PID_FILE" 2>/dev/null || echo)"
+  if [[ -n "$prev" ]] && kill -0 "$prev" 2>/dev/null; then
+    kill "$prev" 2>/dev/null || true
+    # Give it a moment to die before we overwrite the pid file.
+    for _ in 1 2 3 4 5; do
+      kill -0 "$prev" 2>/dev/null || break
+      sleep 0.2
+    done
+    kill -9 "$prev" 2>/dev/null || true
+  fi
+  rm -f "$ATTACH_PID_FILE"
+fi
+
+echo $$ > "$ATTACH_PID_FILE"
+trap 'rm -f "$ATTACH_PID_FILE"' EXIT
 
 echo "attached to coordinator for $PROJECT_ROOT (pid $pid)"
 echo "Ctrl-C to detach; coordinator keeps running."

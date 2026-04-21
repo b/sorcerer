@@ -22,9 +22,10 @@ The submit script dispatches on the first word:
 - `stop` → stop the coordinator for the current project
 - `status` → print sorcerer.yaml + coordinator pid state
 - `attach` → stream live event updates from a running coordinator
+- `log` → print the full formatted event history for this project
 - anything else → submit as a new request and auto-attach to the live event stream
 
-All four forms are just `bash sorcerer-submit.sh "<whatever user typed>"` from the skill's perspective.
+All five forms are just `bash sorcerer-submit.sh "<whatever user typed>"` from the skill's perspective.
 
 If the user's message is literally empty after `/sorcerer`, the submit script prints a usage block on stderr and exits 2 — just print that verbatim.
 
