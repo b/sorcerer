@@ -242,47 +242,41 @@ Cases:
 - `mf=present, hb=present` — designer just finished writing; wait for next tick.
 - `mf=absent, hb=present` — designer still working. Step 11 handles staleness.
 
-#### 5c. Implement completion detection
+#### 5c. Implement / feedback completion detection
 
-For each `active_wizards` entry with `mode: implement` and `status: running`:
+For each `active_wizards` entry with `mode: implement` (covers both initial implement and any subsequent feedback cycles — the mode stays implement; feedback is a spawn phase) and `status: running`:
 
 ```bash
 test -f <state_dir>/heartbeat && hb=present || hb=absent
 test -f <state_dir>/pr_urls.json && pr=present || pr=absent
+# Determine which spawn is running by reading the most recent log file's last line.
+# Logs: logs/spawn.txt for initial implement; logs/feedback-<N>.txt for feedback cycle N.
+latest_log=$(ls -t <state_dir>/logs/*.txt 2>/dev/null | head -1)
+last_line=$(tail -1 "$latest_log" 2>/dev/null)
 ```
 
 Cases:
-- `pr=present, hb=absent` — **completed**:
-  - Read `<state_dir>/pr_urls.json` (a `{<owner/repo>: <pr url>}` map).
+- `hb=absent` AND `pr=present` AND `last_line` starts with `IMPLEMENT_OK` or `FEEDBACK_OK`:
+  - **Completed successfully.**
+  - Read `<state_dir>/pr_urls.json`.
   - Print to **stdout**:
     ```
-    Implement <id> completed (<issue_key>). PRs:
-      - <owner/repo>: <pr_url>
+    <phase> <wizard-id> completed (<issue_key>). PRs:
       - <owner/repo>: <pr_url>
     ```
-  - Append to `state/events.log`:
+    (`<phase>` = "Implement" if initial, "Feedback cycle <N>" otherwise.)
+  - Append event:
     ```json
-    {"ts":"...","event":"implement-completed","id":"<id>","issue_key":"<SOR-N>","pr_count":<N>}
+    {"ts":"...","event":"implement-completed"|"feedback-completed","id":"<id>","issue_key":"<SOR-N>","pr_count":<N>,"cycle":<N or null>}
     ```
   - Update entry: `status: awaiting-review`, `pr_urls: <map>`.
-  - Emit `tick: skipped pr-set-review — not yet implemented`.
-- `pr=absent, hb=absent`:
-  - If `now - started_at < 30s`, too early. Skip.
-  - Otherwise: `status: failed`. Append to `state/escalations.log`:
-    ```yaml
-    - ts: <ISO-8601>
-      wizard_id: <id>
-      mode: implement
-      issue_key: <SOR-N>
-      pr_urls: null
-      rule: implement-no-output
-      attempted: |
-        Implement spawned; exited without writing pr_urls.json.
-      needs_from_user: |
-        Inspect <state_dir>/logs/spawn.txt for error output.
-    ```
-- `pr=present, hb=present` — wizard just finishing; wait for next tick.
-- `pr=absent, hb=present` — implement still working. Heartbeat staleness handled in step 11c.
+- `hb=absent` AND `last_line` starts with `IMPLEMENT_FAILED` or `FEEDBACK_FAILED`:
+  - Wizard reported its own failure. Update `status: failed`. Append to `state/escalations.log` with `rule: <implement|feedback>-self-reported-failure`, include the wizard's failure reason.
+- `hb=absent` AND `pr=absent` AND no completion marker in log:
+  - If `now - started_at < 30s`, too early — skip.
+  - Otherwise: crashed without writing output. `status: failed`. Append to `state/escalations.log` with `rule: implement-no-output` (or `feedback-no-output`).
+- `pr=present, hb=present` — wizard mid-write; wait for next tick.
+- `hb=present` — wizard still working; step 11c handles staleness.
 
 ### Step 6 — Spawn designers
 
@@ -510,11 +504,11 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
    - Is the diff size proportional to what the criteria asked for, or is it suspiciously large or small?
 
    **Decision:**
-   - **merge** — criteria met, no significant concerns. Proceed to step 6.
-   - **escalate** — high-severity security finding, or `state == "MERGEABLE": false` (conflicts), or anything sorcerer cannot autonomously resolve. Update entry to `status: blocked`, append to `state/escalations.log` with `rule: review-escalation` and a description.
-   - **refer-back** — fixable concerns. **For slice 9 only**, refer-back is treated the same as escalate (with `rule: refer-back-not-yet-implemented`). Slice 10 will add the actual refer-back + feedback wizard path.
+   - **merge** — criteria met, no significant concerns. Proceed to step 6a.
+   - **refer-back** — fixable concerns (missing test, minor bug, style issue, etc.). Proceed to step 6b.
+   - **escalate** — high-severity security finding, `mergeable == CONFLICTING`, or anything sorcerer cannot autonomously resolve. Update entry to `status: blocked`, append to `state/escalations.log` with `rule: review-escalation` and a description. Also escalate if `refer_back_cycle >= max_refer_back_cycles` (hard cap from `config.yaml:limits.max_refer_back_cycles`, default 5).
 
-6. **Merge action** (only when decision == merge):
+6a. **Merge action** (only when decision == merge):
    - For each PR (in `merge_order` if declared, else any order): `gh pr merge <pr_url> --auto --squash --delete-branch`. With auto-merge, the PR merges as soon as conditions are met (no required checks → immediately).
    - Update entry: `status: merging`, `review_decision: merge`.
    - Append to `state/events.log`:
@@ -522,6 +516,61 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
      {"ts":"...","event":"review-merge","id":"<wizard-id>","issue_key":"<SOR-N>","pr_count":<N>}
      ```
    - Print to **stdout**: `Reviewed and queued for merge: <issue_key> (<N> PR(s)).`
+
+6b. **Refer-back action** (only when decision == refer-back):
+   - Increment `refer_back_cycle` on the entry (initialize to 0 if absent, so first refer-back sets it to 1).
+   - Check the cap: if `refer_back_cycle > max_refer_back_cycles`, treat as escalate (rule: `refer-back-cap-reached`). Otherwise continue.
+   - Pick the **primary PR** — the first entry in `pr_urls` alphabetical by repo, or the one with the most changed files if ambiguous.
+   - Post a structured comment on the primary PR:
+     ```bash
+     gh pr comment <primary_pr_url> --body "$(cat <<EOF
+     sorcerer review (cycle <N>):
+
+     Failing gates: <CI | bot | LLM | combination>
+
+     Concerns:
+     1. [<repo>/<file>] <concrete concern — what's wrong, what needs to change>
+     2. [<repo>/<file>:<line>] <concrete concern>
+     ...
+
+     Next: address these concerns and push updates to the same branch(es).
+     The coordinator will re-review on the next tick.
+     EOF
+     )"
+     ```
+   - Mirror a short pointer on each sibling PR (non-primary):
+     ```bash
+     gh pr comment <sibling_pr_url> --body "See <primary_pr_url> for the cross-PR review (cycle <N>)."
+     ```
+   - Transition Linear issue back to `In Progress` via `mcp__plugin_linear_linear__save_issue` with `state="In Progress"`.
+   - **Update `<state_dir>/meta.yaml`** — add `pr_urls` + `refer_back_cycle` fields so the feedback wizard's context-builder has them. Use python, not heredoc:
+     ```bash
+     python3 - <<PY
+     import yaml
+     p = "<state_dir>/meta.yaml"
+     m = yaml.safe_load(open(p)) or {}
+     m["pr_urls"] = <pr_urls dict>
+     m["refer_back_cycle"] = <N>
+     with open(p + ".tmp", "w") as f:
+         yaml.safe_dump(m, f, sort_keys=False, default_flow_style=False)
+     import os; os.rename(p + ".tmp", p)
+     PY
+     ```
+   - **Spawn the feedback wizard** (detached):
+     ```bash
+     nohup bash scripts/spawn-wizard.sh feedback \
+       --wizard-id <wizard-id-same-as-implement> \
+       --issue-meta-file <state_dir>/meta.yaml \
+       > <state_dir>/logs/feedback-<N>.txt 2>&1 &
+     echo $!
+     ```
+     Note: this reuses the same wizard-id as the implement wizard (single active_wizards entry per issue; status tracks phase).
+   - Update entry: `status: running`, `review_decision: null`, `pid: <new pid>`. Touch the wizard's heartbeat timer too (reset).
+   - Append to `state/events.log`:
+     ```json
+     {"ts":"...","event":"review-refer-back","id":"<wizard-id>","issue_key":"<SOR-N>","cycle":<N>,"primary_pr":"<url>"}
+     ```
+   - Print to **stdout**: `Referred back: <issue_key> (cycle <N>). Feedback wizard spawned.`
 
 ### Step 13 — Cleanup merged issues
 

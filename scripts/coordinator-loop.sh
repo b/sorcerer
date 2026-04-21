@@ -39,8 +39,10 @@ has_in_flight_work() {
   # Includes:
   #   - pending-architect / running / pending-design  — sessions about to start or in progress
   #   - awaiting-tier-2 / awaiting-tier-3             — deferred spawns at concurrency cap
-  #   - awaiting-review                                — slice 9 step 12 will review on the next tick
-  #   - merging                                        — slice 9 step 13 will detect merge completion on the next tick
+  #   - awaiting-review                                — step 12 will review on the next tick
+  #   - merging                                        — step 13 will detect merge completion on the next tick
+  # Note: refer-back does NOT introduce a new status — it transitions awaiting-review → running
+  # in the same tick (step 12 spawns the feedback session inline). So no `needs-feedback` etc.
   # Excludes: merged, failed, blocked (terminal — no more progress without user intervention).
   if compgen -G "state/requests/*.md" > /dev/null 2>&1; then
     return 0
