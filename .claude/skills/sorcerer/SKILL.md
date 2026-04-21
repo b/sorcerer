@@ -10,21 +10,23 @@ The user invoked you via `/sorcerer`. Their full message describes a system they
 
 ## Job
 
-Extract the prompt body (everything after `/sorcerer ` in their message, or after a `/sorcerer` line for multi-line input) and pass it as a single argument to the submit script. Print the script's output verbatim and stop.
+Extract the argument — everything after `/sorcerer ` in the user's message (or after a `/sorcerer` line for multi-line input) — and pass it as a single argument to the submit script. Print the script's output verbatim and stop.
 
 ```bash
-bash $SORCERER_REPO/scripts/sorcerer-submit.sh "<the extracted prompt>"
+bash $SORCERER_REPO/scripts/sorcerer-submit.sh "<extracted arg>"
 ```
 
 That one Bash call is the entire skill. Pre-approved in `~/.claude/settings.json` by `scripts/install-skill.sh`, so this runs without prompting.
 
-If the user's message is empty after `/sorcerer` (no prompt body), print:
+The submit script dispatches on the first word:
+- `stop` → stop the coordinator for the current project
+- `status` → print sorcerer.yaml + coordinator pid state
+- `attach` → stream live event updates from a running coordinator
+- anything else → submit as a new request and auto-attach to the live event stream
 
-```
-Usage: /sorcerer <description of the system to build or refactor>
-```
+All four forms are just `bash sorcerer-submit.sh "<whatever user typed>"` from the skill's perspective.
 
-…and stop. Do not invoke the script with an empty argument.
+If the user's message is literally empty after `/sorcerer`, the submit script prints a usage block on stderr and exits 2 — just print that verbatim.
 
 ## Rules
 
