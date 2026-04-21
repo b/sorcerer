@@ -1,56 +1,165 @@
 #!/usr/bin/env bash
-# Submit a feature request to sorcerer and ensure the coordinator is running.
+# /sorcerer entry point.
 #
-# Usage: scripts/sorcerer-submit.sh "<prompt>"
+# Usage (via the /sorcerer skill, which calls this as a single Bash command):
+#   /sorcerer <prompt>           →  submit a new request
+#   /sorcerer stop               →  stop the coordinator for THIS project
+#   /sorcerer status             →  print current sorcerer.yaml summary
 #
-# This script is the ENTIRE backing for the /sorcerer slash command.
-# The skill itself issues only ONE Bash call (this one), so users can
-# pre-approve it with a single allow rule in ~/.claude/settings.json
-# (installed by scripts/install-skill.sh).
+# "This project" = the user's current working directory. All sorcerer state
+# for the project lives under <project>/.sorcerer/ — config.yaml, state
+# (requests/architects/wizards/logs), coordinator pid, bare clones. Sorcerer's
+# TOOL itself (scripts + prompts + skill) lives at $SORCERER_REPO; that's
+# where this script is installed from but NOT where work happens.
 set -euo pipefail
 
 if [[ -z "${SORCERER_REPO:-}" ]]; then
   cat >&2 <<EOF
 ERROR: SORCERER_REPO env var is not set.
 
-Set it to the absolute path of your sorcerer repo:
+Set it to the absolute path of your sorcerer tool repo:
   echo 'export SORCERER_REPO=/path/to/sorcerer' >> ~/.shell_env
   source ~/.shell_env
 EOF
   exit 1
 fi
-if [[ ! -d "$SORCERER_REPO" ]]; then
-  echo "ERROR: SORCERER_REPO points to a non-existent directory: $SORCERER_REPO" >&2
-  exit 1
-fi
-cd "$SORCERER_REPO"
 
-PROMPT="${1:-}"
-if [[ -z "$PROMPT" ]]; then
-  cat >&2 <<'EOF'
-Usage: /sorcerer <description of the system to build or refactor>
+# Detect project root. Default: cwd. If cwd is inside a git repo, walk up to
+# the repo root — that way the user can type /sorcerer from a subdirectory
+# and get a .sorcerer/ at the project root.
+project_root() {
+  local d="$PWD"
+  # If inside a git repo, use the repo root.
+  if git rev-parse --show-toplevel >/dev/null 2>&1; then
+    git rev-parse --show-toplevel
+    return
+  fi
+  # Otherwise, just use cwd.
+  echo "$d"
+}
+
+PROJECT_ROOT="$(project_root)"
+
+ARG="${1:-}"
+
+# --- Subcommand dispatch --------------------------------------------------
+case "$ARG" in
+  stop)
+    exec bash "$SORCERER_REPO/scripts/stop-coordinator.sh" "$PROJECT_ROOT"
+    ;;
+  status)
+    STATE_FILE="$PROJECT_ROOT/.sorcerer/sorcerer.yaml"
+    if [[ ! -f "$STATE_FILE" ]]; then
+      echo "No sorcerer state at $STATE_FILE — nothing has run here yet."
+      exit 0
+    fi
+    echo "=== sorcerer status for $PROJECT_ROOT ==="
+    cat "$STATE_FILE"
+    if [[ -f "$PROJECT_ROOT/.sorcerer/coordinator.pid" ]]; then
+      pid=$(cat "$PROJECT_ROOT/.sorcerer/coordinator.pid")
+      if kill -0 "$pid" 2>/dev/null; then
+        echo
+        echo "Coordinator running (pid $pid)"
+      else
+        echo
+        echo "Coordinator NOT running (stale pid $pid)"
+      fi
+    else
+      echo
+      echo "Coordinator NOT running"
+    fi
+    exit 0
+    ;;
+  "")
+    cat >&2 <<'EOF'
+Usage:
+  /sorcerer <description of the system to build or refactor>   — submit a request
+  /sorcerer stop                                                — stop the coordinator
+  /sorcerer status                                              — show current state
 
 Sorcerer is for ambitious work — a new service, a cross-repo refactor, a
-multi-component feature. Describe the desired end state; the architect
-will decompose it.
-
-Example:
-  /sorcerer Build a real-time pricing service: ingestion from Kafka, in-memory
-  cache backed by Redis, gRPC API for clients, Prometheus metrics.
+multi-component feature. Describe the desired end state; the architect will
+decompose it.
 EOF
-  exit 2
+    exit 2
+    ;;
+esac
+
+# --- Submit flow ----------------------------------------------------------
+PROMPT="$ARG"
+STATE="$PROJECT_ROOT/.sorcerer"
+mkdir -p "$STATE/requests"
+
+# Bootstrap config.yaml if missing. Derive repo from git remote.
+if [[ ! -f "$STATE/config.yaml" ]]; then
+  remote_url="$(cd "$PROJECT_ROOT" && git remote get-url origin 2>/dev/null || true)"
+  if [[ -z "$remote_url" ]]; then
+    cat >&2 <<EOF
+ERROR: $PROJECT_ROOT has no git origin remote, so sorcerer can't auto-bootstrap
+$STATE/config.yaml. Either (a) run this from a directory that is a git repo
+with a github.com remote, or (b) create $STATE/config.yaml by hand (see
+$SORCERER_REPO/config.yaml.example for the schema).
+EOF
+    exit 1
+  fi
+
+  # Parse git@github.com:owner/repo.git OR https://github.com/owner/repo.git
+  slug="$(printf '%s\n' "$remote_url" \
+    | sed -E 's#^git@github.com:##; s#^https://github.com/##; s#\.git$##')"
+  if ! [[ "$slug" =~ ^[^/]+/[^/]+$ ]]; then
+    echo "ERROR: could not parse owner/repo from remote URL: $remote_url" >&2
+    exit 1
+  fi
+
+  team_key="${SORCERER_DEFAULT_TEAM_KEY:-SOR}"
+  cat > "$STATE/config.yaml" <<YAML
+# Auto-generated by sorcerer on first /sorcerer invocation.
+# Edit to add additional repos, models, limits, or linear team key.
+
+repos:
+  - github.com/$slug
+
+explorable_repos:
+  - github.com/$slug
+
+linear:
+  default_team_key: $team_key
+  wizard_label: wizard
+
+models:
+  coordinator: claude-sonnet-4-6
+  architect: claude-opus-4-7
+  designer: claude-opus-4-7
+  executor: claude-sonnet-4-6
+  reviewer: claude-opus-4-7
+
+architect:
+  auto_threshold:
+    min_repos: 3
+    min_issues_estimate: 12
+
+limits:
+  max_concurrent_wizards: 3
+  max_refer_back_cycles: 5
+
+merge:
+  strategy: squash
+  delete_branch: true
+YAML
+  echo "Bootstrapped $STATE/config.yaml (repo: github.com/$slug, team: $team_key)"
+  echo "Edit it to adjust — in particular add other repos if this work spans multiple."
+  echo
 fi
 
-mkdir -p state/requests
-TS=$(date -u +%Y%m%dT%H%M%SZ)
-FIRST_LINE=$(printf '%s' "$PROMPT" | head -1)
-SLUG=$(printf '%s' "$FIRST_LINE" | head -c 80 | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | tr -s '-' | sed 's/^-//;s/-$//' | head -c 60 | sed 's/-$//')
-[[ -z "$SLUG" ]] && SLUG=request
-FILE="state/requests/${TS}-${SLUG}.md"
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+FIRST_LINE="$(printf '%s' "$PROMPT" | head -1)"
+SLUG="$(printf '%s' "$FIRST_LINE" | head -c 80 | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | tr -s '-' | sed 's/^-//;s/-$//' | head -c 60 | sed 's/-$//')"
+[[ -z "$SLUG" ]] && SLUG="request"
+FILE="$STATE/requests/${TS}-${SLUG}.md"
 printf '%s\n' "$PROMPT" > "$FILE"
 
 echo "Request submitted: $FILE"
-bash scripts/start-coordinator.sh
+bash "$SORCERER_REPO/scripts/start-coordinator.sh" "$PROJECT_ROOT"
 
 cat <<EOF
 
@@ -60,6 +169,8 @@ Sorcerer will autonomously:
   3. Implement — spawn wizards to work each issue across the relevant repos
   4. Review — gate every PR set against acceptance criteria, then merge
 
-Monitor:  tail -f $SORCERER_REPO/state/coordinator.log $SORCERER_REPO/state/events.log
-Stop:     bash $SORCERER_REPO/scripts/stop-coordinator.sh
+State + logs:       $STATE/
+Monitor (for now):  tail -f $STATE/coordinator.log $STATE/events.log
+Status:             /sorcerer status
+Stop:               /sorcerer stop
 EOF

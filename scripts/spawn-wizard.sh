@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Spawn a wizard session for a given mode.
+# Spawn a wizard session for a given mode, in the CURRENT PROJECT.
 #
-# Usage: scripts/spawn-wizard.sh <mode>
+# The caller's cwd is the project root; state lives under .sorcerer/ there.
+# The tool itself (prompts, helper scripts) lives at $SORCERER_REPO.
+#
+# Usage: scripts/spawn-wizard.sh <mode> [options]
 #
 # Modes:
 #   noop       — minimal wizard for spawn-machinery testing. No side effects.
@@ -14,49 +17,37 @@
 #   --request-file <path>            request markdown (required for architect)
 #   --architect-plan-file <path>     architect's plan.yaml (required for design)
 #   --sub-epic-index <int>           which sub-epic in the plan (required for design)
-#   --issue-meta-file <path>         per-issue meta.yaml (required for implement);
-#                                    its parent dir is the implement wizard's state_dir
+#   --issue-meta-file <path>         per-issue meta.yaml (required for implement/feedback);
+#                                    its parent dir is the wizard's state_dir
 #   --state-dir <path>               override the default state_dir computation
 #   --model <name>                   override the default model (e.g. claude-sonnet-4-6)
 #   --wizard-id <uuid>               use this UUID instead of generating one (lets
 #                                    the coordinator pre-create state/<parent>/<id>/
 #                                    and track sessions by a known id)
 #
-# Runs the wizard synchronously and returns its exit code. Callers that want
-# detached execution should wrap with `nohup ... &` or equivalent — the
-# coordinator owns process lifecycle, not this script.
-#
-# Always:
-#   - generates a fresh wizard UUID
-#   - creates state/wizards/<id>/ (or state/architects/<id>/ for architect mode)
-#   - writes context.yaml with the standard fields documented in
-#     ~/.claude/skills/wizard/SORCERER.md
-#   - launches `claude -p` with SORCERER_CONTEXT_FILE pointing at it
-#   - cwd of the wizard session is its state_dir
+# Runs synchronously; returns the wizard's exit code. Callers that want
+# detached execution should wrap with `nohup ... &`.
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
+: "${SORCERER_REPO:?SORCERER_REPO must be set}"
 
-# Source the coordinator's token cache if present, so $GITHUB_TOKEN reaches the
-# claude -p subprocess without the coordinator having to export it inline.
-# The coordinator writes this file via `bash scripts/refresh-token.sh > state/.token-env`.
-TOKEN_ENV="$REPO_ROOT/state/.token-env"
-if [[ -f "$TOKEN_ENV" ]]; then
+PROJECT_ROOT="$(pwd)"
+STATE="$PROJECT_ROOT/.sorcerer"
+
+# Source per-project token cache if available.
+if [[ -f "$STATE/.token-env" ]]; then
   # shellcheck source=/dev/null
-  source "$TOKEN_ENV"
+  source "$STATE/.token-env"
 fi
 
 MODE="${1:-}"
 shift || true
 case "$MODE" in
   noop|architect|design|implement|feedback) ;;
-  *) echo "Usage: $0 <mode> [--request-file <path>] [--model <name>]" >&2
+  *) echo "Usage: $0 <mode> [options]" >&2
      echo "Modes: noop, architect, design, implement, feedback" >&2
      exit 2 ;;
 esac
-
-# All modes are now live.
 
 REQUEST_FILE=""
 MODEL=""
@@ -106,8 +97,6 @@ fi
 if [[ "$MODE" == "implement" || "$MODE" == "feedback" ]]; then
   [[ -n "$ISSUE_META_FILE" ]] || { echo "ERROR: $MODE mode requires --issue-meta-file <path>" >&2; exit 2; }
   [[ -f "$ISSUE_META_FILE" ]] || { echo "ERROR: issue meta file not found: $ISSUE_META_FILE" >&2; exit 2; }
-  # Implement + feedback modes run in the issue dir, not the default state/<parent>/<id>/.
-  # The issue dir is the parent of the meta file; feedback shares state_dir with the implement it follows.
   if [[ -z "$STATE_DIR_OVERRIDE" ]]; then
     STATE_DIR_OVERRIDE="$(cd "$(dirname "$ISSUE_META_FILE")" && pwd)"
   fi
@@ -116,49 +105,48 @@ fi
 command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 required" >&2; exit 1; }
 command -v claude  >/dev/null 2>&1 || { echo "ERROR: claude CLI required" >&2; exit 1; }
 
-# UUID: caller-supplied (--wizard-id) takes precedence so the coordinator can
-# pre-create state/<parent>/<id>/ and track the session by a known id without
-# parsing this script's stdout. mkdir -p below is idempotent either way.
 if [[ -n "$WIZARD_ID_OVERRIDE" ]]; then
   WIZARD_ID="$WIZARD_ID_OVERRIDE"
 else
-  WIZARD_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
+  WIZARD_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 fi
 
 if [[ -n "$STATE_DIR_OVERRIDE" ]]; then
   STATE_DIR="$STATE_DIR_OVERRIDE"
 else
   case "$MODE" in
-    architect) PARENT="state/architects" ;;
-    *)         PARENT="state/wizards" ;;
+    architect) PARENT="architects" ;;
+    *)         PARENT="wizards" ;;
   esac
-  STATE_DIR="$REPO_ROOT/$PARENT/$WIZARD_ID"
+  STATE_DIR="$STATE/$PARENT/$WIZARD_ID"
 fi
 mkdir -p "$STATE_DIR/logs"
-mkdir -p "$REPO_ROOT/state"
+mkdir -p "$STATE"
 
 CONTEXT_FILE="$STATE_DIR/context.yaml"
 HEARTBEAT_FILE="$STATE_DIR/heartbeat"
-ESCALATION_LOG="$REPO_ROOT/state/escalations.log"
+ESCALATION_LOG="$STATE/escalations.log"
 touch "$ESCALATION_LOG"
 
-CONFIG="${SORCERER_CONFIG:-$REPO_ROOT/config.yaml}"
+CONFIG="${SORCERER_CONFIG:-$STATE/config.yaml}"
 if [[ "$MODE" == "architect" || "$MODE" == "design" ]]; then
   [[ -f "$CONFIG" ]] || { echo "ERROR: $MODE mode requires config.yaml at $CONFIG" >&2; exit 1; }
 fi
 
 REQUEST_FILE_ABS=""
-[[ -n "$REQUEST_FILE" ]] && REQUEST_FILE_ABS=$(readlink -f "$REQUEST_FILE")
+[[ -n "$REQUEST_FILE" ]] && REQUEST_FILE_ABS="$(readlink -f "$REQUEST_FILE")"
 
 ARCHITECT_PLAN_FILE_ABS=""
-[[ -n "$ARCHITECT_PLAN_FILE" ]] && ARCHITECT_PLAN_FILE_ABS=$(readlink -f "$ARCHITECT_PLAN_FILE")
+[[ -n "$ARCHITECT_PLAN_FILE" ]] && ARCHITECT_PLAN_FILE_ABS="$(readlink -f "$ARCHITECT_PLAN_FILE")"
 
 ISSUE_META_FILE_ABS=""
-[[ -n "$ISSUE_META_FILE" ]] && ISSUE_META_FILE_ABS=$(readlink -f "$ISSUE_META_FILE")
+[[ -n "$ISSUE_META_FILE" ]] && ISSUE_META_FILE_ABS="$(readlink -f "$ISSUE_META_FILE")"
 
-python3 - "$MODE" "$WIZARD_ID" "$HEARTBEAT_FILE" "$ESCALATION_LOG" "$STATE_DIR" "${CONFIG:-/dev/null}" "$REQUEST_FILE_ABS" "$REPO_ROOT" "$ARCHITECT_PLAN_FILE_ABS" "$SUB_EPIC_INDEX" "$ISSUE_META_FILE_ABS" > "$CONTEXT_FILE" <<'PY'
+BARE_CLONES_DIR="$STATE/repos"
+
+python3 - "$MODE" "$WIZARD_ID" "$HEARTBEAT_FILE" "$ESCALATION_LOG" "$STATE_DIR" "${CONFIG:-/dev/null}" "$REQUEST_FILE_ABS" "$BARE_CLONES_DIR" "$ARCHITECT_PLAN_FILE_ABS" "$SUB_EPIC_INDEX" "$ISSUE_META_FILE_ABS" > "$CONTEXT_FILE" <<'PY'
 import os, sys, yaml
-mode, wizard_id, heartbeat, escalation, state_dir, config_path, request, repo_root, plan_path, sub_epic_index, meta_path = sys.argv[1:12]
+mode, wizard_id, heartbeat, escalation, state_dir, config_path, request, bare_clones_dir, plan_path, sub_epic_index, meta_path = sys.argv[1:12]
 
 ctx = {
   'wizard_id': wizard_id,
@@ -176,7 +164,7 @@ if mode == 'architect':
   ctx['request_file'] = request
   ctx['explorable_repos'] = cfg.get('explorable_repos') or []
   ctx['repos'] = cfg.get('repos') or []
-  ctx['bare_clones_dir'] = f"{repo_root}/repos"
+  ctx['bare_clones_dir'] = bare_clones_dir
 
 elif mode == 'design':
   with open(config_path) as f:
@@ -197,7 +185,7 @@ elif mode == 'design':
   ctx['request_file'] = os.path.join(arch_dir, 'request.md')
   ctx['repos'] = sub_epic.get('repos') or []
   ctx['explorable_repos'] = sub_epic.get('explorable_repos') or []
-  ctx['bare_clones_dir'] = f"{repo_root}/repos"
+  ctx['bare_clones_dir'] = bare_clones_dir
 
 elif mode == 'implement':
   with open(meta_path) as f:
@@ -227,7 +215,7 @@ PY
 # from pre-existing worktrees; the coordinator's tick step 9 handles their
 # bare-clone creation before creating the worktree.
 if [[ "$MODE" == "architect" || "$MODE" == "design" ]]; then
-  REPO_LIST=$(python3 - "$CONTEXT_FILE" <<'PY'
+  REPO_LIST="$(python3 - "$CONTEXT_FILE" <<'PY'
 import sys, yaml
 with open(sys.argv[1]) as f:
     ctx = yaml.safe_load(f) or {}
@@ -238,19 +226,19 @@ for r in (ctx.get('repos') or []):
 for r in repos:
     print(r)
 PY
-  )
+)"
   if [[ -n "$REPO_LIST" ]]; then
     # shellcheck disable=SC2086
-    bash "$REPO_ROOT/scripts/ensure-bare-clones.sh" $REPO_LIST
+    bash "$SORCERER_REPO/scripts/ensure-bare-clones.sh" "$PROJECT_ROOT" $REPO_LIST
   fi
 fi
 
 case "$MODE" in
-  noop)      PROMPT_FILE="$REPO_ROOT/prompts/wizard-noop.md" ;;
-  architect) PROMPT_FILE="$REPO_ROOT/prompts/architect.md" ;;
-  design)    PROMPT_FILE="$REPO_ROOT/prompts/wizard-design.md" ;;
-  implement) PROMPT_FILE="$REPO_ROOT/prompts/wizard-implement.md" ;;
-  feedback)  PROMPT_FILE="$REPO_ROOT/prompts/wizard-feedback.md" ;;
+  noop)      PROMPT_FILE="$SORCERER_REPO/prompts/wizard-noop.md" ;;
+  architect) PROMPT_FILE="$SORCERER_REPO/prompts/architect.md" ;;
+  design)    PROMPT_FILE="$SORCERER_REPO/prompts/wizard-design.md" ;;
+  implement) PROMPT_FILE="$SORCERER_REPO/prompts/wizard-implement.md" ;;
+  feedback)  PROMPT_FILE="$SORCERER_REPO/prompts/wizard-feedback.md" ;;
 esac
 [[ -f "$PROMPT_FILE" ]] || { echo "ERROR: missing prompt file $PROMPT_FILE" >&2; exit 1; }
 
@@ -267,15 +255,6 @@ PROMPT="$(cat "$PROMPT_FILE")"
 
 cd "$STATE_DIR"
 
-# Build claude invocation. Notes:
-# - We deliberately do NOT pass --add-dir. The wizard's cwd is its state_dir,
-#   which Claude Code makes accessible by default. Adding --add-dir here would
-#   greedily consume the positional prompt argument as another directory path
-#   and silently fast-exit. Modes that need access to additional directories
-#   (e.g. implement wizards needing worktree paths) should use a `--`
-#   separator to terminate the directory list before the prompt.
-# - stdin is redirected to /dev/null so claude doesn't pause 3s waiting for
-#   piped input.
 EXTRA_ARGS=()
 [[ -n "$MODEL" ]] && EXTRA_ARGS+=(--model "$MODEL")
 

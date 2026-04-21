@@ -8,12 +8,12 @@ You are running as the sorcerer coordinator. Each invocation is one execution of
 - Your cwd is the sorcerer repo root. Every path below is relative to it.
 - Read `config.yaml` for tunables (`limits.max_concurrent_wizards`, `architect.auto_threshold`).
 - The tick is idempotent — every action is guarded by status checks. Repeating or dropping a tick is safe.
-- Write `state/sorcerer.yaml` via `python3 yaml.safe_dump` (NOT bash heredocs) so all field values serialize correctly.
+- Write `.sorcerer/sorcerer.yaml` via `python3 yaml.safe_dump` (NOT bash heredocs) so all field values serialize correctly.
 - Stay terse. After each step emit a one-line status (e.g. `step 3: drained 1 request`). On unrecoverable failure print `TICK_FAILED: step <N> — <reason>` and stop.
 
 ## State files
 
-**`state/sorcerer.yaml`** — the persistent index:
+**`.sorcerer/sorcerer.yaml`** — the persistent index:
 ```yaml
 active_architects:
   - id: <uuid>
@@ -55,7 +55,7 @@ active_wizards:
     respawn_count: 0
 ```
 
-**`state/.token-env`** — written by step 2; sourced by `scripts/spawn-wizard.sh` at startup:
+**`.sorcerer/.token-env`** — written by step 2; sourced by `scripts/spawn-wizard.sh` at startup:
 ```
 export GITHUB_TOKEN='ghs_...'
 export GH_TOKEN='ghs_...'
@@ -63,7 +63,7 @@ export GH_APP_INSTALLATION_ID='...'
 export GH_APP_TOKEN_EXPIRES_AT='2026-04-21T00:00:00Z'
 ```
 
-**`state/events.log`** — append-only JSONL:
+**`.sorcerer/events.log`** — append-only JSONL:
 ```json
 {"ts":"...","event":"token-refreshed"}
 {"ts":"...","event":"architect-spawned","id":"<uuid>","pid":12345}
@@ -73,29 +73,29 @@ export GH_APP_TOKEN_EXPIRES_AT='2026-04-21T00:00:00Z'
 {"ts":"...","event":"tick-complete"}
 ```
 
-**`state/escalations.log`** — append-only YAML records (one per failure).
+**`.sorcerer/escalations.log`** — append-only YAML records (one per failure).
 
 ## Tick steps
 
 ### Step 1 — Reconcile state
 
-1. Read `state/sorcerer.yaml`. If absent, treat the in-memory state as `{active_architects: [], active_wizards: []}`.
-2. Scan `state/architects/` for subdirectories. For each `<id>` whose entry is NOT in `active_architects` AND whose `state/architects/<id>/plan.yaml` exists, append a recovery entry:
+1. Read `.sorcerer/sorcerer.yaml`. If absent, treat the in-memory state as `{active_architects: [], active_wizards: []}`.
+2. Scan `.sorcerer/architects/` for subdirectories. For each `<id>` whose entry is NOT in `active_architects` AND whose `.sorcerer/architects/<id>/plan.yaml` exists, append a recovery entry:
    ```yaml
    - id: <id>
      status: awaiting-tier-2
      started_at: <dir mtime, as ISO-8601>
-     request_file: state/architects/<id>/request.md
-     plan_file: state/architects/<id>/plan.yaml
+     request_file: .sorcerer/architects/<id>/request.md
+     plan_file: .sorcerer/architects/<id>/plan.yaml
      pid: null
      respawn_count: 0
    ```
-   Useful: `ls -d state/architects/*/ 2>/dev/null` and `stat -c %Y state/architects/<id>` (epoch → use `date -u -d @<epoch> +%Y-%m-%dT%H:%M:%SZ` to format).
+   Useful: `ls -d .sorcerer/architects/*/ 2>/dev/null` and `stat -c %Y .sorcerer/architects/<id>` (epoch → use `date -u -d @<epoch> +%Y-%m-%dT%H:%M:%SZ` to format).
 
 ### Step 2 — Token refresh
 
 ```bash
-TOKEN_FILE=state/.token-env
+TOKEN_FILE=.sorcerer/.token-env
 needs_refresh=0
 if [[ ! -f "$TOKEN_FILE" ]]; then
   needs_refresh=1
@@ -109,14 +109,14 @@ else
 fi
 
 if (( needs_refresh )); then
-  bash scripts/refresh-token.sh > state/.token-env
-  printf '{"ts":"%s","event":"token-refreshed"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> state/events.log
+  bash scripts/refresh-token.sh > .sorcerer/.token-env
+  printf '{"ts":"%s","event":"token-refreshed"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .sorcerer/events.log
 fi
 ```
 
 ### Step 3 — Drain requests
 
-For each `state/requests/*.md`:
+For each `.sorcerer/requests/*.md`:
 
 1. Skip files whose `request_file` is already tracked in `active_architects` or `active_wizards` (compare absolute paths).
 2. Routing decision:
@@ -124,14 +124,14 @@ For each `state/requests/*.md`:
    - Otherwise → architect by default for now (the design route is stubbed below until Tier-2 is implemented).
 3. Generate UUID: `python3 -c "import uuid; print(uuid.uuid4())"`.
 4. For architect route:
-   - `mkdir -p state/architects/<id>/logs`
-   - `mv state/requests/<file> state/architects/<id>/request.md`
+   - `mkdir -p .sorcerer/architects/<id>/logs`
+   - `mv .sorcerer/requests/<file> .sorcerer/architects/<id>/request.md`
    - Append to `active_architects`:
      ```yaml
      - id: <id>
        status: pending-architect
        started_at: <ISO-8601 now>
-       request_file: state/architects/<id>/request.md
+       request_file: .sorcerer/architects/<id>/request.md
        plan_file: null
        pid: null
        respawn_count: 0
@@ -145,8 +145,8 @@ Read `config.yaml:limits.max_concurrent_wizards` (default 3). Count entries with
 ```bash
 nohup bash scripts/spawn-wizard.sh architect \
   --wizard-id <id> \
-  --request-file state/architects/<id>/request.md \
-  > state/architects/<id>/logs/spawn.txt 2>&1 &
+  --request-file .sorcerer/architects/<id>/request.md \
+  > .sorcerer/architects/<id>/logs/spawn.txt 2>&1 &
 echo $!
 ```
 
@@ -164,27 +164,27 @@ If at the concurrency ceiling, emit `tick: concurrency-limit reached, deferring 
 For each `active_architects` entry with `status: running`:
 
 ```bash
-test -f state/architects/<id>/heartbeat && hb=present || hb=absent
-test -f state/architects/<id>/plan.yaml && pl=present || pl=absent
+test -f .sorcerer/architects/<id>/heartbeat && hb=present || hb=absent
+test -f .sorcerer/architects/<id>/plan.yaml && pl=present || pl=absent
 ```
 
 Cases:
 - `pl=present, hb=absent` — **completed**:
-  - Read `state/architects/<id>/plan.yaml` (parse `sub_epics`).
+  - Read `.sorcerer/architects/<id>/plan.yaml` (parse `sub_epics`).
   - Print to **stdout**:
     ```
     Architect <id> completed. Sub-epics (<N>):
       - <name> [repos: <r1>, <r2>]
       - <name> (depends on: <dep>) [repos: <r>]
     ```
-  - Append to `state/events.log`:
+  - Append to `.sorcerer/events.log`:
     ```json
     {"ts":"...","event":"architect-completed","id":"<id>","sub_epics":["<n1>","<n2>"]}
     ```
-  - Update entry: `status: awaiting-tier-2`, `plan_file: state/architects/<id>/plan.yaml`.
+  - Update entry: `status: awaiting-tier-2`, `plan_file: .sorcerer/architects/<id>/plan.yaml`.
 - `pl=absent, hb=absent` — possible failure:
   - If `now - started_at < 30s`, too early to judge. Skip.
-  - Otherwise: `status: failed`. Append to `state/escalations.log`:
+  - Otherwise: `status: failed`. Append to `.sorcerer/escalations.log`:
     ```yaml
     - ts: <ISO-8601>
       wizard_id: <id>
@@ -195,7 +195,7 @@ Cases:
       attempted: |
         Architect spawned; exited without writing plan.yaml.
       needs_from_user: |
-        Inspect state/architects/<id>/logs/spawn.txt for error output.
+        Inspect .sorcerer/architects/<id>/logs/spawn.txt for error output.
     ```
 - `pl=present, hb=present` — architect mid-write or just finished writing; wait for the next tick.
 - `pl=absent, hb=present` — architect still working. Heartbeat staleness handled in step 11.
@@ -205,28 +205,28 @@ Cases:
 For each `active_wizards` entry with `mode: design` and `status: running`:
 
 ```bash
-test -f state/wizards/<id>/heartbeat && hb=present || hb=absent
-test -f state/wizards/<id>/manifest.yaml && mf=present || mf=absent
+test -f .sorcerer/wizards/<id>/heartbeat && hb=present || hb=absent
+test -f .sorcerer/wizards/<id>/manifest.yaml && mf=present || mf=absent
 ```
 
 Cases:
 - `mf=present, hb=absent` — **completed**:
-  - Read `state/wizards/<id>/manifest.yaml` (parse `epic_linear_id`, `sub_epic_name`, `issues`).
+  - Read `.sorcerer/wizards/<id>/manifest.yaml` (parse `epic_linear_id`, `sub_epic_name`, `issues`).
   - Print to **stdout**:
     ```
     Designer <id> completed (sub-epic "<sub_epic_name>"). Linear epic: <epic_linear_id>. <N> issues:
       - <issue_key> [repos: <r1>, <r2>]
       - <issue_key> (depends on: <dep>) [repos: <r>]
     ```
-  - Append to `state/events.log`:
+  - Append to `.sorcerer/events.log`:
     ```json
     {"ts":"...","event":"designer-completed","id":"<id>","epic_linear_id":"<epic-id>","issues":<N>}
     ```
-  - Update entry: `status: awaiting-tier-3`, `manifest_file: state/wizards/<id>/manifest.yaml`, `epic_linear_id: <id>`.
+  - Update entry: `status: awaiting-tier-3`, `manifest_file: .sorcerer/wizards/<id>/manifest.yaml`, `epic_linear_id: <id>`.
   - Emit `tick: skipped tier-3-spawn — not yet implemented`.
 - `mf=absent, hb=absent`:
   - If `now - started_at < 30s`, too early to judge. Skip.
-  - Otherwise: `status: failed`. Append to `state/escalations.log`:
+  - Otherwise: `status: failed`. Append to `.sorcerer/escalations.log`:
     ```yaml
     - ts: <ISO-8601>
       wizard_id: <id>
@@ -237,7 +237,7 @@ Cases:
       attempted: |
         Designer spawned; exited without writing manifest.yaml.
       needs_from_user: |
-        Inspect state/wizards/<id>/logs/spawn.txt for error output.
+        Inspect .sorcerer/wizards/<id>/logs/spawn.txt for error output.
     ```
 - `mf=present, hb=present` — designer just finished writing; wait for next tick.
 - `mf=absent, hb=present` — designer still working. Step 11 handles staleness.
@@ -271,10 +271,10 @@ Cases:
     ```
   - Update entry: `status: awaiting-review`, `pr_urls: <map>`.
 - `hb=absent` AND `last_line` starts with `IMPLEMENT_FAILED` or `FEEDBACK_FAILED`:
-  - Wizard reported its own failure. Update `status: failed`. Append to `state/escalations.log` with `rule: <implement|feedback>-self-reported-failure`, include the wizard's failure reason.
+  - Wizard reported its own failure. Update `status: failed`. Append to `.sorcerer/escalations.log` with `rule: <implement|feedback>-self-reported-failure`, include the wizard's failure reason.
 - `hb=absent` AND `pr=absent` AND no completion marker in log:
   - If `now - started_at < 30s`, too early — skip.
-  - Otherwise: crashed without writing output. `status: failed`. Append to `state/escalations.log` with `rule: implement-no-output` (or `feedback-no-output`).
+  - Otherwise: crashed without writing output. `status: failed`. Append to `.sorcerer/escalations.log` with `rule: implement-no-output` (or `feedback-no-output`).
 - `pr=present, hb=present` — wizard mid-write; wait for next tick.
 - `hb=present` — wizard still working; step 11c handles staleness.
 
@@ -282,7 +282,7 @@ Cases:
 
 For each `active_architects` entry with `status: awaiting-tier-2`:
 
-1. Read `state/architects/<arch-id>/plan.yaml`. Parse `sub_epics` (list of objects with `name`, `mandate`, `repos`, `explorable_repos`, optional `depends_on`).
+1. Read `.sorcerer/architects/<arch-id>/plan.yaml`. Parse `sub_epics` (list of objects with `name`, `mandate`, `repos`, `explorable_repos`, optional `depends_on`).
 
 2. Check concurrency: read `config.yaml:limits.max_concurrent_wizards` (default 3). Count entries with `status: running` across `active_architects + active_wizards`.
 
@@ -290,14 +290,14 @@ For each `active_architects` entry with `status: awaiting-tier-2`:
    - If running-count is at the limit: emit `tick: concurrency-limit reached, deferring designer spawn for sub-epic "<name>"` and stop spawning more for this architect (the next tick will pick up).
    - Otherwise:
      - Generate UUID: `python3 -c "import uuid; print(uuid.uuid4())"`.
-     - `mkdir -p state/wizards/<wizard-id>/logs`.
+     - `mkdir -p .sorcerer/wizards/<wizard-id>/logs`.
      - Spawn the designer:
        ```bash
        nohup bash scripts/spawn-wizard.sh design \
          --wizard-id <wizard-id> \
-         --architect-plan-file state/architects/<arch-id>/plan.yaml \
+         --architect-plan-file .sorcerer/architects/<arch-id>/plan.yaml \
          --sub-epic-index <i> \
-         > state/wizards/<wizard-id>/logs/spawn.txt 2>&1 &
+         > .sorcerer/wizards/<wizard-id>/logs/spawn.txt 2>&1 &
        echo $!
        ```
      - Capture PID.
@@ -331,7 +331,7 @@ Emit: `tick: skipped step-7-linear-poll — not yet implemented` (issue state au
 
 For each `active_wizards` entry with `mode: design` and `status: awaiting-tier-3`:
 
-1. Read its `manifest_file` (`state/wizards/<designer-id>/manifest.yaml`). Parse `issues` (list of `{linear_id, issue_key, repos, merge_order?, depends_on?}`).
+1. Read its `manifest_file` (`.sorcerer/wizards/<designer-id>/manifest.yaml`). Parse `issues` (list of `{linear_id, issue_key, repos, merge_order?, depends_on?}`).
 2. For each issue, check if there's already an `active_wizards` entry with `mode: implement` and `issue_linear_id` matching this issue. If yes, skip (already scheduled or running or done).
 3. **Dependency check.** If the issue has a non-empty `depends_on` list (other `linear_id` or `issue_key` values), verify every dependency is merged before scheduling:
    - For each `dep` in `depends_on`:
@@ -349,7 +349,7 @@ Collect the candidate list across all designers. Then in steps 9 and 10, process
 Read `config.yaml:limits.max_concurrent_wizards` (default 3). Count running entries. For each implement candidate from step 8, while running-count is below the cap:
 
 1. Generate UUID: `python3 -c "import uuid; print(uuid.uuid4())"`. This is the implement wizard's id.
-2. Compute the issue dir: `state/wizards/<designer-id>/issues/<issue-key>/` (use `issue_key` like `SOR-11` — filesystem-safe).
+2. Compute the issue dir: `.sorcerer/wizards/<designer-id>/issues/<issue-key>/` (use `issue_key` like `SOR-11` — filesystem-safe).
 3. `mkdir -p <state_dir>/logs <state_dir>/trees`.
 4. Fetch Linear issue: `mcp__plugin_linear_linear__get_issue` with `id=<issue.linear_id>` to get `gitBranchName`. Capture as `branch_name`.
 5. **Ensure bare clones exist** for every repo this issue touches. One call covers all of them; the script is idempotent and auto-mints per-owner tokens:
@@ -427,7 +427,7 @@ After processing all candidates for a designer, if every issue in its manifest h
 For each `active_architects` entry with `status: running`:
 
 ```bash
-mtime=$(stat -c %Y state/architects/<id>/heartbeat 2>/dev/null)
+mtime=$(stat -c %Y .sorcerer/architects/<id>/heartbeat 2>/dev/null)
 ```
 
 - If `mtime` is empty (file missing): step 5a already classified it; skip here.
@@ -436,22 +436,22 @@ mtime=$(stat -c %Y state/architects/<id>/heartbeat 2>/dev/null)
     ```bash
     nohup bash scripts/spawn-wizard.sh architect \
       --wizard-id <id> \
-      --request-file state/architects/<id>/request.md \
-      > state/architects/<id>/logs/spawn.txt 2>&1 &
+      --request-file .sorcerer/architects/<id>/request.md \
+      > .sorcerer/architects/<id>/logs/spawn.txt 2>&1 &
     echo $!
     ```
     Capture new pid. Append:
     ```json
     {"ts":"...","event":"architect-stale-respawn","id":"<id>","new_pid":12345}
     ```
-  - `respawn_count >= 1`: `status: failed`. Append to `state/escalations.log` with `rule: stale-heartbeat-second-failure`.
+  - `respawn_count >= 1`: `status: failed`. Append to `.sorcerer/escalations.log` with `rule: stale-heartbeat-second-failure`.
 
 #### 11b. Designer wizards
 
 For each `active_wizards` entry with `mode: design` and `status: running`:
 
 ```bash
-mtime=$(stat -c %Y state/wizards/<id>/heartbeat 2>/dev/null)
+mtime=$(stat -c %Y .sorcerer/wizards/<id>/heartbeat 2>/dev/null)
 ```
 
 - If `mtime` is empty (file missing): step 5b already classified it; skip here.
@@ -460,13 +460,13 @@ mtime=$(stat -c %Y state/wizards/<id>/heartbeat 2>/dev/null)
     ```bash
     nohup bash scripts/spawn-wizard.sh design \
       --wizard-id <id> \
-      --architect-plan-file state/architects/<architect_id>/plan.yaml \
+      --architect-plan-file .sorcerer/architects/<architect_id>/plan.yaml \
       --sub-epic-index <sub_epic_index> \
-      > state/wizards/<id>/logs/spawn.txt 2>&1 &
+      > .sorcerer/wizards/<id>/logs/spawn.txt 2>&1 &
     echo $!
     ```
     Capture new pid. Append `designer-stale-respawn` event.
-  - `respawn_count >= 1`: `status: failed`. Append to `state/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: design`.
+  - `respawn_count >= 1`: `status: failed`. Append to `.sorcerer/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: design`.
 
 #### 11c. Implement wizards
 
@@ -487,7 +487,7 @@ mtime=$(stat -c %Y <state_dir>/heartbeat 2>/dev/null)
     echo $!
     ```
     Capture new pid. Append `implement-stale-respawn` event.
-  - `respawn_count >= 1`: `status: failed`. Append to `state/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: implement`, `issue_key: <SOR-N>`.
+  - `respawn_count >= 1`: `status: failed`. Append to `.sorcerer/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: implement`, `issue_key: <SOR-N>`.
 
 ### Step 12 — PR-set review and merge
 
@@ -516,12 +516,12 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
    **Decision:**
    - **merge** — criteria met, no significant concerns. Proceed to step 6a.
    - **refer-back** — fixable concerns (missing test, minor bug, style issue, etc.). Proceed to step 6b.
-   - **escalate** — high-severity security finding, `mergeable == CONFLICTING`, or anything sorcerer cannot autonomously resolve. Update entry to `status: blocked`, append to `state/escalations.log` with `rule: review-escalation` and a description. Also escalate if `refer_back_cycle >= max_refer_back_cycles` (hard cap from `config.yaml:limits.max_refer_back_cycles`, default 5).
+   - **escalate** — high-severity security finding, `mergeable == CONFLICTING`, or anything sorcerer cannot autonomously resolve. Update entry to `status: blocked`, append to `.sorcerer/escalations.log` with `rule: review-escalation` and a description. Also escalate if `refer_back_cycle >= max_refer_back_cycles` (hard cap from `config.yaml:limits.max_refer_back_cycles`, default 5).
 
 6a. **Merge action** (only when decision == merge):
    - For each PR (in `merge_order` if declared, else any order): `gh pr merge <pr_url> --auto --squash --delete-branch`. With auto-merge, the PR merges as soon as conditions are met (no required checks → immediately).
    - Update entry: `status: merging`, `review_decision: merge`.
-   - Append to `state/events.log`:
+   - Append to `.sorcerer/events.log`:
      ```json
      {"ts":"...","event":"review-merge","id":"<wizard-id>","issue_key":"<SOR-N>","pr_count":<N>}
      ```
@@ -576,7 +576,7 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
      ```
      Note: this reuses the same wizard-id as the implement wizard (single active_wizards entry per issue; status tracks phase).
    - Update entry: `status: running`, `review_decision: null`, `pid: <new pid>`. Touch the wizard's heartbeat timer too (reset).
-   - Append to `state/events.log`:
+   - Append to `.sorcerer/events.log`:
      ```json
      {"ts":"...","event":"review-refer-back","id":"<wizard-id>","issue_key":"<SOR-N>","cycle":<N>,"primary_pr":"<url>"}
      ```
@@ -600,7 +600,7 @@ For each `active_wizards` entry with `mode: implement` and `status: merging`:
      mcp__plugin_linear_linear__save_issue with id=<issue_linear_id>, state="Done"
      ```
    - Update entry: `status: merged`.
-   - Append to `state/events.log`:
+   - Append to `.sorcerer/events.log`:
      ```json
      {"ts":"...","event":"issue-merged","id":"<wizard-id>","issue_key":"<SOR-N>"}
      ```
@@ -615,10 +615,10 @@ Terminal-state entries (architects with `status: completed` or `failed`; wizards
 For each `active_architects` entry with `status` in (`completed`, `failed`):
 1. Compute `age_days = (now - started_at) / 1 day`.
 2. If `age_days > 7`:
-   - Resolve the state dir: `state/architects/<id>/`.
-   - Remove it: `rm -rf state/architects/<id>`.
+   - Resolve the state dir: `.sorcerer/architects/<id>/`.
+   - Remove it: `rm -rf .sorcerer/architects/<id>`.
    - Update entry: `status: archived`. Keep the entry in `active_architects` (renamed to "archived" in spirit; still serves as an audit record with `archived_at` recorded).
-   - Append to `state/events.log`:
+   - Append to `.sorcerer/events.log`:
      ```json
      {"ts":"...","event":"architect-archived","id":"<id>","prior_status":"<completed|failed>"}
      ```
@@ -626,10 +626,10 @@ For each `active_architects` entry with `status` in (`completed`, `failed`):
 For each `active_wizards` entry with `status` in (`merged`, `failed`, `blocked`):
 1. Compute `age_days = (now - started_at) / 1 day`.
 2. If `age_days > 7`:
-   - Resolve the state dir. For designer wizards (mode=design): `state/wizards/<id>/`. For implement/feedback wizards (mode=implement with merged/failed/blocked status): the `state_dir` field on the entry (the issue dir).
+   - Resolve the state dir. For designer wizards (mode=design): `.sorcerer/wizards/<id>/`. For implement/feedback wizards (mode=implement with merged/failed/blocked status): the `state_dir` field on the entry (the issue dir).
    - Remove it: `rm -rf <state_dir>`.
    - Update entry: `status: archived`, `archived_at: <ISO-8601 now>`.
-   - Append to `state/events.log`:
+   - Append to `.sorcerer/events.log`:
      ```json
      {"ts":"...","event":"wizard-archived","id":"<id>","mode":"<design|implement>","prior_status":"<merged|failed|blocked>"}
      ```
@@ -638,19 +638,19 @@ For each `active_wizards` entry with `status` in (`merged`, `failed`, `blocked`)
 
 ### Step 15 — Persist state
 
-Write the in-memory state back to `state/sorcerer.yaml` via Python (NOT bash heredocs):
+Write the in-memory state back to `.sorcerer/sorcerer.yaml` via Python (NOT bash heredocs):
 
 ```bash
 python3 -c "
 import sys, yaml, json
 state = json.loads(sys.argv[1])
 yaml.safe_dump(state, sys.stdout, sort_keys=False, default_flow_style=False)
-" '<json-state>' > state/sorcerer.yaml
+" '<json-state>' > .sorcerer/sorcerer.yaml
 ```
 
 Then append:
 ```bash
-printf '{"ts":"%s","event":"tick-complete"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> state/events.log
+printf '{"ts":"%s","event":"tick-complete"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .sorcerer/events.log
 ```
 
 ### Final
