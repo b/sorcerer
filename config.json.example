@@ -1,0 +1,41 @@
+{
+  "_comment": "Sorcerer configuration. Copy to <project>/.sorcerer/config.json (or the project bootstrap writes this automatically on first /sorcerer invocation). Fields documented in docs/setup.md.",
+
+  "repos": [
+    "github.com/b/sorcerer"
+  ],
+
+  "explorable_repos": [
+    "github.com/b/sorcerer"
+  ],
+
+  "linear": {
+    "default_team_key": "ENG",
+    "wizard_label": "wizard"
+  },
+
+  "models": {
+    "coordinator": "claude-opus-4-7",
+    "architect":   "claude-opus-4-7",
+    "designer":    "claude-opus-4-7",
+    "executor":    "claude-opus-4-7",
+    "reviewer":    "claude-opus-4-7"
+  },
+
+  "architect": {
+    "auto_threshold": {
+      "min_repos": 3,
+      "min_issues_estimate": 12
+    }
+  },
+
+  "limits": {
+    "max_concurrent_wizards": 3,
+    "max_refer_back_cycles": 5
+  },
+
+  "merge": {
+    "strategy": "squash",
+    "delete_branch": true
+  }
+}

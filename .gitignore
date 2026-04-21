@@ -4,6 +4,7 @@
 # Legacy layout (pre-slice-15) — still gitignored so migration is safe
 state/
 repos/
+config.json
 config.yaml
 
 # Local secrets

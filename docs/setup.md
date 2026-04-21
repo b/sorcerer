@@ -10,7 +10,7 @@ Hard requirements. `scripts/doctor.sh` refuses to pass if any is missing.
 - Git 2.40+.
 - `claude` CLI 2.1.1+.
 - `gh` CLI 2.40+.
-- `jq`, `curl`, `openssl`, `python3` (used by `scripts/refresh-token.sh` and `scripts/doctor.sh`).
+- `jq`, `curl`, `openssl`, `uuidgen` (used by `scripts/refresh-token.sh`, `scripts/spawn-wizard.sh`, `scripts/doctor.sh`, and the coordinator tick).
 - `shellcheck` (used by `scripts/lint.sh`).
 - **Linear MCP server** installed and connected in Claude Code (`claude mcp list` shows Linear with `✓ Connected`).
 - **GitHub App** installed on every repo in both `repos` and `explorable_repos`, with a private key on disk and the refresh script wired up.
@@ -18,7 +18,7 @@ Hard requirements. `scripts/doctor.sh` refuses to pass if any is missing.
 
 ## Two-tier repo allowlist
 
-Sorcerer has two lists in `config.yaml`:
+Sorcerer has two lists in `config.json`:
 
 - `repos` — repos sorcerer may open PRs in and merge to. Every issue's `repos: [...]` must be a subset of this list.
 - `explorable_repos` — superset of `repos`; repos sorcerer may **read** during design (architect exploration, Tier-2 decomposition). The App must be installed on every one.
@@ -89,14 +89,17 @@ Linear MCP is already connected (`claude mcp list | grep linear` must show `✓ 
 ### Team identifier (user)
 
 1. Open any issue in the target Linear team. URL ends `/issue/<TEAM>-<NUM>/...` — `<TEAM>` is the team key.
-2. Add to `config.yaml`:
-   ```yaml
-   linear:
-     default_team_key: ENG
-     wizard_label: wizard
+2. Add to `config.json`:
+   ```json
+   {
+     "linear": {
+       "default_team_key": "ENG",
+       "wizard_label":     "wizard"
+     }
+   }
    ```
 
-**auto**: first run resolves `default_team_key` → team UUID via `list_teams`, caches in `state/sorcerer.yaml`.
+**auto**: first run resolves `default_team_key` → team UUID via `list_teams`, caches in `<project>/.sorcerer/sorcerer.json`.
 
 ### Linear-GitHub integration (user, recommended)
 
@@ -113,44 +116,54 @@ Verify:
 claude --version && claude -p "echo ready"
 ```
 
-## Minimal `config.yaml`
+## Minimal `config.json`
 
-```yaml
-repos:                             # mergeable targets
-  - github.com/acme/widget-api
-  - github.com/acme/widget-web
-
-explorable_repos:                  # readable during design (superset of repos)
-  - github.com/acme/widget-api
-  - github.com/acme/widget-web
-  - github.com/acme/shared-protos
-  - github.com/acme/deployment-config
-
-linear:
-  default_team_key: ENG
-  wizard_label: wizard
-
-models:
-  coordinator: claude-opus-4-7
-  architect: claude-opus-4-7
-  designer: claude-opus-4-7
-  executor: claude-opus-4-7
-  reviewer: claude-opus-4-7
-
-architect:
-  # Auto-invoke Tier 1 when the request looks this big.
-  auto_threshold:
-    min_repos: 3                   # request likely touches ≥ this many repos
-    min_issues_estimate: 12        # ...or estimated to produce ≥ this many issues
-
-limits:
-  max_concurrent_wizards: 3
-  max_refer_back_cycles: 5
-
-merge:
-  strategy: squash                 # squash | merge | rebase
-  delete_branch: true
+```json
+{
+  "repos": [
+    "github.com/acme/widget-api",
+    "github.com/acme/widget-web"
+  ],
+  "explorable_repos": [
+    "github.com/acme/widget-api",
+    "github.com/acme/widget-web",
+    "github.com/acme/shared-protos",
+    "github.com/acme/deployment-config"
+  ],
+  "linear": {
+    "default_team_key": "ENG",
+    "wizard_label":     "wizard"
+  },
+  "models": {
+    "coordinator": "claude-opus-4-7",
+    "architect":   "claude-opus-4-7",
+    "designer":    "claude-opus-4-7",
+    "executor":    "claude-opus-4-7",
+    "reviewer":    "claude-opus-4-7"
+  },
+  "architect": {
+    "auto_threshold": {
+      "min_repos": 3,
+      "min_issues_estimate": 12
+    }
+  },
+  "limits": {
+    "max_concurrent_wizards": 3,
+    "max_refer_back_cycles":  5
+  },
+  "merge": {
+    "strategy":      "squash",
+    "delete_branch": true
+  }
+}
 ```
+
+Field notes:
+- `repos` — mergeable targets.
+- `explorable_repos` — readable during design; must be a superset of `repos`.
+- `architect.auto_threshold` — auto-invoke Tier 1 when the request is expected to touch `min_repos`+ repos or produce `min_issues_estimate`+ issues.
+- `merge.strategy` — one of `squash | merge | rebase`.
+- JSON has no comments — refer to these notes or `config.json.example` for reference field semantics.
 
 ## Verification
 
@@ -179,5 +192,5 @@ Fix anything fatal before starting `/loop`.
 - [ ] Verify `bash scripts/refresh-token.sh` emits a valid token.
 - [ ] Configure branch protection + auto-merge on every repo in `repos`.
 - [ ] (Recommended) Connect Linear's GitHub integration.
-- [ ] Fill in `config.yaml` (repos, explorable_repos, team key, models, architect thresholds, limits).
+- [ ] Fill in `<project>/.sorcerer/config.json` (repos, explorable_repos, team key, models, architect thresholds, limits). Auto-bootstrapped on first `/sorcerer` call in a project; edit from the template if you need multi-repo or a non-default Linear team.
 - [ ] `bash scripts/doctor.sh` passes clean (bare clones auto-created on first use; doctor reports pending ones as NOTE).

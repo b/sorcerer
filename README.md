@@ -38,13 +38,17 @@ Read in order:
    ```
    /sorcerer <your large-system description>
    ```
-3. Monitor (any terminal, any time):
+3. Monitor live (streams new events):
    ```
-   tail -f state/coordinator.log state/events.log
+   /sorcerer attach
+   ```
+   Or scroll the full history:
+   ```
+   /sorcerer log
    ```
 4. Stop everything (graceful):
    ```
-   bash scripts/stop-coordinator.sh
+   /sorcerer stop
    ```
 
 ## Repository layout
@@ -53,7 +57,20 @@ Read in order:
 .claude/skills/sorcerer/   # the /sorcerer slash command
 prompts/                   # architect / wizard / coordinator-tick prompts
 scripts/                   # coordinator + spawn + doctor + token refresh
-state/                     # runtime state — gitignored
-repos/                     # bare clones of allowlisted repos — gitignored
-config.yaml                # per-user config (gitignored; copy from config.yaml.example)
+config.json.example        # template for per-project config.json
+```
+
+At runtime, everything project-specific lives under `<your-project>/.sorcerer/`:
+
+```
+.sorcerer/
+  config.json              # per-project config (auto-bootstrapped on first /sorcerer call)
+  sorcerer.json            # coordinator's live state (active_architects + active_wizards)
+  events.log               # append-only JSONL progress log
+  escalations.log          # append-only JSONL escalations
+  coordinator.{pid,log}    # detached coordinator process state
+  requests/                # queued request markdown files
+  architects/<id>/         # per-architect state dirs (plan.json, logs/, etc.)
+  wizards/<id>/            # per-wizard state dirs (manifest.json, issues/, logs/, etc.)
+  repos/<owner>-<repo>.git # bare clones, one per explorable repo
 ```

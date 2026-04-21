@@ -58,13 +58,13 @@ echo
 
 # Orient the user with any recent events (tail last 20), then stream live.
 if [[ -s "$EVENTS" ]]; then
-  tail -n 20 "$EVENTS" | python3 "$SORCERER_REPO/scripts/format-event.py" || true
+  tail -n 20 "$EVENTS" | bash "$SORCERER_REPO/scripts/format-event.sh" || true
 fi
 
 # Stream new events; exit when the coordinator pid exits.
 # `tail -n 0 -F --pid=$pid` follows the file and dies when the pid dies.
 tail -n 0 -F --pid="$pid" "$EVENTS" 2>/dev/null \
-  | python3 "$SORCERER_REPO/scripts/format-event.py"
+  | bash "$SORCERER_REPO/scripts/format-event.sh"
 
 echo
 echo "coordinator exited; no in-flight work remaining."

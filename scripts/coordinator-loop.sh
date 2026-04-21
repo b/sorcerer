@@ -4,12 +4,12 @@
 # Usage: scripts/coordinator-loop.sh <project-root>
 #
 # Runs the tick prompt repeatedly via `claude -p` in the project's directory
-# until there is no pending work in <project>/.sorcerer/sorcerer.yaml, then
+# until there is no pending work in <project>/.sorcerer/sorcerer.json, then
 # exits cleanly. /sorcerer re-spawns this loop (via start-coordinator.sh) when
 # new requests arrive.
 #
 # Pending work = a file in .sorcerer/requests/, OR an active entry in
-# .sorcerer/sorcerer.yaml with an in-flight status.
+# .sorcerer/sorcerer.json with an in-flight status.
 set -uo pipefail
 
 : "${SORCERER_REPO:?SORCERER_REPO must be set}"
@@ -39,7 +39,17 @@ has_in_flight_work() {
   if compgen -G ".sorcerer/requests/*.md" > /dev/null 2>&1; then
     return 0
   fi
-  if [[ -f .sorcerer/sorcerer.yaml ]] && grep -qE 'status: (pending-architect|running|awaiting-tier-2|awaiting-tier-3|pending-design|awaiting-review|merging)' .sorcerer/sorcerer.yaml; then
+  if [[ -f .sorcerer/sorcerer.json ]] && jq -e '
+      def entries: (.active_architects // []) + (.active_wizards // []);
+      [entries[].status] | any(
+        . == "pending-architect" or
+        . == "running"           or
+        . == "awaiting-tier-2"   or
+        . == "awaiting-tier-3"   or
+        . == "pending-design"    or
+        . == "awaiting-review"   or
+        . == "merging"
+      )' .sorcerer/sorcerer.json > /dev/null 2>&1; then
     return 0
   fi
   return 1
@@ -57,7 +67,7 @@ while true; do
   # No --model: use whatever claude's default is (currently opus). The tick
   # does real judgment work — state-machine routing, PR-set review, failure
   # classification — so we want the stronger model by default. If an operator
-  # wants to downgrade for cost, they can edit .sorcerer/config.yaml and we'll
+  # wants to downgrade for cost, they can edit .sorcerer/config.json and we'll
   # honor it in a future slice that reads models.coordinator at tick time.
   if ! claude -p \
       --output-format text \
@@ -68,7 +78,10 @@ while true; do
   fi
 
   # Pacing: 30s while anything is actively running, 60s otherwise.
-  if [[ -f .sorcerer/sorcerer.yaml ]] && grep -qE 'status: running' .sorcerer/sorcerer.yaml; then
+  if [[ -f .sorcerer/sorcerer.json ]] && jq -e '
+      def entries: (.active_architects // []) + (.active_wizards // []);
+      [entries[].status] | any(. == "running")
+    ' .sorcerer/sorcerer.json > /dev/null 2>&1; then
     sleep 30
   else
     sleep 60

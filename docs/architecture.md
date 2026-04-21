@@ -30,9 +30,9 @@ Sorcerer is prompts, scripts, and state files. No compiled codebase, no daemon, 
 | Linear access | Linear MCP server (`mcp__plugin_linear_linear__*`) |
 | Repo isolation | `git worktree` off a bare clone — one worktree per (issue × affected repo) |
 | LLM | Claude, via the `claude` CLI |
-| State | Plain YAML / JSONL files under `state/` |
+| State | Plain JSON / JSONL files under `<project>/.sorcerer/`; `jq` + `uuidgen` do all serialization |
 
-No Python. No SQLite. No Linear CLI. No GitHub MCP. Linear goes over MCP because the plugin is already connected; GitHub goes over `gh` because the auth stack is a 1-hour App installation token refreshed out-of-band and that composes poorly with MCP's baked-Bearer-token config.
+No Python. No SQLite. No Linear CLI. No GitHub MCP. State is JSON everywhere (`sorcerer.json`, `plan.json`, `manifest.json`, `meta.json`, `context.json`, `pr_urls.json`) and logs are JSONL (`events.log`, `escalations.log`); `jq` handles all reads and writes, so there's no YAML parser dependency. Linear goes over MCP because the plugin is already connected; GitHub goes over `gh` because the auth stack is a 1-hour App installation token refreshed out-of-band and that composes poorly with MCP's baked-Bearer-token config.
 
 ## Actors
 
@@ -47,7 +47,7 @@ One instance per user. Runs until stopped. Owns:
 A one-shot session for large/complex requests. Produces a durable design doc and a sub-epic plan. Does **not** create Linear issues directly — it delegates that to Tier-2 designers. See [`design-flow.md`](design-flow.md).
 
 ### Wizard
-The identity that owns one Linear epic (one sub-epic, in Tier-1 flows). Not a running process — persists as `state/wizards/<id>/`. Its work is done by short-lived wizard sessions, one per task (design, implement-an-issue, address-feedback).
+The identity that owns one Linear epic (one sub-epic, in Tier-1 flows). Not a running process — persists as `.sorcerer/wizards/<id>/`. Its work is done by short-lived wizard sessions, one per task (design, implement-an-issue, address-feedback).
 
 An epic, and any individual issue in it, may span multiple repos.
 
@@ -58,44 +58,55 @@ An epic, and any individual issue in it, may span multiple repos.
 
 ## Component layout
 
+The sorcerer tool itself (this repo):
 ```
 sorcerer/
 ├── prompts/
-│   ├── sorcerer-tick.md           # coordinator tick prompt
-│   ├── architect.md               # Tier-1 architect prompt
-│   ├── wizard-design.md           # Tier-2 designer prompt
+│   ├── sorcerer-tick.md              # coordinator tick prompt
+│   ├── architect.md                  # Tier-1 architect prompt
+│   ├── wizard-design.md              # Tier-2 designer prompt
 │   ├── wizard-implement.md
 │   ├── wizard-feedback.md
-│   └── review-pr.md               # PR-set review sub-prompt
+│   └── review-pr.md                  # PR-set review sub-prompt
 ├── scripts/
+│   ├── coordinator-loop.sh           # detached loop running the tick
+│   ├── start-coordinator.sh          # idempotent launcher
+│   ├── stop-coordinator.sh           # graceful kill switch
+│   ├── sorcerer-submit.sh            # /sorcerer dispatcher
+│   ├── sorcerer-attach.sh            # live event stream
 │   ├── spawn-wizard.sh
-│   ├── spawn-architect.sh
-│   ├── refresh-token.sh           # mints a fresh GitHub App installation token
-│   ├── cleanup-wizard.sh
-│   ├── stop.sh                    # kill switch
-│   └── doctor.sh                  # preflight verification
-├── state/
-│   ├── sorcerer.yaml
-│   ├── requests/                  # drop feature request files here
-│   ├── architects/<id>/           # Tier-1 outputs (design doc + plan)
-│   ├── wizards/<id>/              # per-wizard state
-│   ├── events.log
-│   └── escalations.log
-├── repos/                         # gitignored; bare clones of every repo in explorable_repos
-│   └── <owner>-<repo>.git/
-├── config.yaml                    # repos, explorable_repos, models, limits
+│   ├── ensure-bare-clones.sh
+│   ├── refresh-token.sh              # mints a fresh GitHub App installation token
+│   ├── format-event.sh               # jq-based event formatter
+│   ├── install-skill.sh              # one-time setup
+│   └── doctor.sh                     # preflight verification
+├── config.json.example               # template for per-project config.json
 └── docs/
+```
+
+Per-project runtime state (NOT in this repo — lives in each project sorcerer works on):
+```
+<project>/.sorcerer/
+├── config.json                       # per-project config (auto-bootstrapped on first run)
+├── sorcerer.json                     # coordinator's live state
+├── events.log                        # append-only JSONL progress log
+├── escalations.log                   # append-only JSONL escalations
+├── coordinator.{pid,log}             # detached coordinator process state
+├── requests/                         # queued request markdown files
+├── architects/<id>/                  # Tier-1 outputs (design.md + plan.json)
+├── wizards/<id>/                     # per-wizard state
+└── repos/<owner>-<repo>.git/         # bare clones; one per repo in explorable_repos
 ```
 
 Per-wizard state:
 ```
-state/wizards/<id>/
-  context.yaml        # rewritten by coordinator before each spawn
-  manifest.yaml       # written at end of design; epic id + issues with their `repos`
+.sorcerer/wizards/<id>/
+  context.json        # rewritten by coordinator before each spawn
+  manifest.json       # written at end of design; epic id + issues with their `repos`
   heartbeat           # present while a session runs; absent between sessions
   logs/*.jsonl
   issues/<issue-id>/
-    meta.yaml         # branch_name + {repo: pr_url} + merge_order + status
+    meta.json         # branch_name + {repo: pr_url} + merge_order + status
     trees/
       <owner>-<repoA>/   # worktree on <branch-name> off repoA
       <owner>-<repoB>/   # worktree on <branch-name> off repoB
@@ -105,14 +116,14 @@ state/wizards/<id>/
 ## Data flow (happy path)
 
 ```
-user        → sorcerer   : type `/sorcerer <prompt>` (writes state/requests/<timestamp>.md, starts coordinator)
+user        → sorcerer   : type `/sorcerer <prompt>` (writes .sorcerer/requests/<timestamp>.md, starts coordinator)
 [large request: Tier 1]
-sorcerer    → architect  : spawn (mode=architect); writes design.md + plan.yaml; exits
+sorcerer    → architect  : spawn (mode=architect); writes design.md + plan.json; exits
 sorcerer    → wizard(s)  : spawn one designer per sub-epic in parallel
 [per wizard, independently]
 sorcerer    → wizard     : spawn (mode=design)
 wizard      → Linear MCP : create Project (epic) + child Issues, each with `repos: [...]`
-wizard      → state      : write manifest.yaml
+wizard      → state      : write manifest.json
 [session exits]
 sorcerer    → git        : for the next issue, create one worktree per repo in its list
 sorcerer    → wizard     : spawn (mode=implement)
@@ -139,7 +150,7 @@ Sorcerer treats every issue as potentially multi-repo. Core rules:
 - **One branch name per issue, reused across every affected repo.** The Linear convention (`<initials>/<team>-<num>-<slug>`) is globally unique, so collisions don't happen. Uniform naming makes cross-repo mental mapping trivial and lets Linear auto-link every sibling PR to the same issue.
 - **One PR per affected repo.** Each PR's body contains `Part of <TEAM-NUM>` (not `Closes`). Linear links without auto-closing; sorcerer explicitly closes the issue after every PR merges.
 - **Review is per-issue, not per-PR.** The coordinator waits for the full PR set to be ready, fetches all of them, and reviews as a coherent change. A merge decision applies to the set; a refer-back can reference cross-PR consistency.
-- **Merge ordering.** When `meta.yaml` declares `merge_order`, sorcerer merges serially, each prior merge as a prereq. Otherwise it enables auto-merge on every PR simultaneously and lets each repo's CI decide timing.
+- **Merge ordering.** When `meta.json` declares `merge_order`, sorcerer merges serially, each prior merge as a prereq. Otherwise it enables auto-merge on every PR simultaneously and lets each repo's CI decide timing.
 - **Sibling-CI breakage.** If PR A merges and PR B's CI then fails because of A's change, sorcerer refers B back — a normal refer-back, not an escalation. Partial-merge state (serial-order step N fails after 1..N-1 merged) **is** an escalation; only a human can decide rollback vs. forward-fix.
 - **Cross-sub-epic dependencies.** `depends_on` in a Linear issue's description may reference issues in sibling sub-epics, but only within the architect plan's declared cross-sub-epic contracts. A Tier-2 designer introducing a previously-unforeseen cross-epic dependency must escalate rather than declare it on its own.
 
@@ -166,7 +177,7 @@ A detached bash loop (`scripts/coordinator-loop.sh`) that runs the tick prompt r
 
 - Each tick is one `claude -p` invocation against `prompts/sorcerer-tick.md`. The session reads state, polls Linear MCP + `gh`, decides actions, executes them, writes state back.
 - Loop sleep interval: 30s while any wizard or architect is `running`, 60s otherwise.
-- The loop **self-exits** when `state/sorcerer.yaml` has no entries with status `pending-architect`, `running`, or `pending-design` (and `state/requests/` is empty). The `/sorcerer` skill spawns a fresh loop the next time a request arrives.
+- The loop **self-exits** when `.sorcerer/sorcerer.json` has no entries with status `pending-architect`, `running`, or `pending-design` (and `.sorcerer/requests/` is empty). The `/sorcerer` skill spawns a fresh loop the next time a request arrives.
 - Tick logic: reconcile state → refresh token if <10min → drain requests (route to architect or designer by size heuristic) → spawn architect sessions → process architect outputs → spawn designer / implement / feedback sessions → heartbeats → PR-set reviews → merge/refer-back/escalate → cleanup → persist.
 - Idempotent.
 
@@ -174,18 +185,18 @@ A detached bash loop (`scripts/coordinator-loop.sh`) that runs the tick prompt r
 
 ### Wizard / architect session
 ```
-SORCERER_CONTEXT_FILE=state/<architects|wizards>/<id>/context.yaml \
+SORCERER_CONTEXT_FILE=.sorcerer/<architects|wizards>/<id>/context.json \
   claude -p "/wizard (sorcerer-managed mode)" \
   --session-id <id>-<seq> \
   --cwd <working-dir>
 ```
 
 `<working-dir>`:
-- **architect**: `state/architects/<id>/`.
-- **design**: `state/wizards/<id>/`.
-- **implement / feedback**: `state/wizards/<id>/issues/<issue-id>/` (parent of `trees/`). The session `cd`s into `trees/<owner>-<repo>/` for per-repo work.
+- **architect**: `.sorcerer/architects/<id>/`.
+- **design**: `.sorcerer/wizards/<id>/`.
+- **implement / feedback**: `.sorcerer/wizards/<id>/issues/<issue-id>/` (parent of `trees/`). The session `cd`s into `trees/<owner>-<repo>/` for per-repo work.
 
-The coordinator rewrites `context.yaml` before each spawn. Schema in [`SORCERER.md`](../../../.claude/skills/wizard/SORCERER.md).
+The coordinator rewrites `context.json` before each spawn. Schema in [`SORCERER.md`](../../../.claude/skills/wizard/SORCERER.md).
 
 Heartbeats every 60s. Stale >5min → respawn once; second failure → escalate.
 

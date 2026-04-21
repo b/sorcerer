@@ -41,8 +41,9 @@ If a proposed change would violate one of these, stop and flag it to the user.
 - `claude -p` subprocesses for architect and wizard sessions.
 - `gh` CLI for GitHub; reads `$GITHUB_TOKEN`, a GitHub App installation token minted by `scripts/refresh-token.sh` (standalone — no cross-repo dependencies).
 - Linear MCP (`mcp__plugin_linear_linear__*`) for Linear.
-- `git` + `git worktree` for per-issue isolation — one worktree per (issue × affected repo), off bare clones under `repos/`.
-- Plain YAML / JSONL files under `state/` for coordinator state.
+- `git` + `git worktree` for per-issue isolation — one worktree per (issue × affected repo), off bare clones under `<project>/.sorcerer/repos/`.
+- Plain JSON / JSONL files under `<project>/.sorcerer/` for coordinator state (`sorcerer.json`, `meta.json`, `context.json`, `plan.json`, `manifest.json`, `events.log`, `escalations.log`). `config.json` is the only human-authored file.
+- `jq` + `uuidgen` for all serialization and id generation. No Python anywhere.
 
 No Python, no SQLite, no daemon, no GitHub MCP. Rationale in `docs/architecture.md` § "Stack".
 
