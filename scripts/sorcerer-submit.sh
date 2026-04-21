@@ -70,12 +70,16 @@ case "$ARG" in
     fi
     exit 0
     ;;
+  attach)
+    exec bash "$SORCERER_REPO/scripts/sorcerer-attach.sh" "$PROJECT_ROOT"
+    ;;
   "")
     cat >&2 <<'EOF'
 Usage:
-  /sorcerer <description of the system to build or refactor>   — submit a request
+  /sorcerer <description of the system to build or refactor>   — submit a request + attach
   /sorcerer stop                                                — stop the coordinator
   /sorcerer status                                              — show current state
+  /sorcerer attach                                              — reattach to a running coordinator
 
 Sorcerer is for ambitious work — a new service, a cross-repo refactor, a
 multi-component feature. Describe the desired end state; the architect will
@@ -169,8 +173,12 @@ Sorcerer will autonomously:
   3. Implement — spawn wizards to work each issue across the relevant repos
   4. Review — gate every PR set against acceptance criteria, then merge
 
-State + logs:       $STATE/
-Monitor (for now):  tail -f $STATE/coordinator.log $STATE/events.log
-Status:             /sorcerer status
-Stop:               /sorcerer stop
+Attaching to live event stream below. Ctrl-C to detach — coordinator keeps running.
+Re-attach any time with:  /sorcerer attach
+Status:                   /sorcerer status
+Stop:                     /sorcerer stop
+
 EOF
+
+# Attach to the event stream so the user sees progress in real time.
+exec bash "$SORCERER_REPO/scripts/sorcerer-attach.sh" "$PROJECT_ROOT"
