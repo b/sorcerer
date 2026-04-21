@@ -17,13 +17,24 @@ You are running as the sorcerer coordinator. Each invocation is one execution of
 ```yaml
 active_architects:
   - id: <uuid>
-    status: pending-architect | running | awaiting-tier-2 | failed
+    status: pending-architect | running | awaiting-tier-2 | completed | failed
     started_at: <ISO-8601>
     request_file: <path>
     plan_file: <path or null>
     pid: <int or null>
     respawn_count: 0
-active_wizards: []   # populated by future sub-epics
+active_wizards:
+  - id: <uuid>
+    mode: design                # implement | feedback added in later slices
+    status: running | awaiting-tier-3 | failed
+    started_at: <ISO-8601>
+    architect_id: <parent architect uuid>
+    sub_epic_index: <int>
+    sub_epic_name: <string>
+    epic_linear_id: <id or null>     # set after design completes
+    manifest_file: <path or null>    # set after design completes
+    pid: <int or null>
+    respawn_count: 0
 ```
 
 **`state/.token-env`** — written by step 2; sourced by `scripts/spawn-wizard.sh` at startup:
@@ -39,6 +50,8 @@ export GH_APP_TOKEN_EXPIRES_AT='2026-04-21T00:00:00Z'
 {"ts":"...","event":"token-refreshed"}
 {"ts":"...","event":"architect-spawned","id":"<uuid>","pid":12345}
 {"ts":"...","event":"architect-completed","id":"<uuid>","sub_epics":["..."]}
+{"ts":"...","event":"designer-spawned","id":"<uuid>","architect_id":"<uuid>","sub_epic":"<name>","pid":12346}
+{"ts":"...","event":"designer-completed","id":"<uuid>","epic_linear_id":"<linear-id>","issues":7}
 {"ts":"...","event":"tick-complete"}
 ```
 
@@ -126,9 +139,11 @@ Capture the PID printed by `echo $!`. Update the entry: `status: running`, `pid:
 
 If at the concurrency ceiling, emit `tick: concurrency-limit reached, deferring spawn of <id>`. Leave status `pending-architect`.
 
-### Step 5 — Process architect outputs
+### Step 5 — Process architect AND designer outputs
 
-For each entry with `status: running`:
+#### 5a. Architect completion detection
+
+For each `active_architects` entry with `status: running`:
 
 ```bash
 test -f state/architects/<id>/heartbeat && hb=present || hb=absent
@@ -149,7 +164,6 @@ Cases:
     {"ts":"...","event":"architect-completed","id":"<id>","sub_epics":["<n1>","<n2>"]}
     ```
   - Update entry: `status: awaiting-tier-2`, `plan_file: state/architects/<id>/plan.yaml`.
-  - Emit `tick: skipped tier-2-spawn — not yet implemented`.
 - `pl=absent, hb=absent` — possible failure:
   - If `now - started_at < 30s`, too early to judge. Skip.
   - Otherwise: `status: failed`. Append to `state/escalations.log`:
@@ -168,9 +182,92 @@ Cases:
 - `pl=present, hb=present` — architect mid-write or just finished writing; wait for the next tick.
 - `pl=absent, hb=present` — architect still working. Heartbeat staleness handled in step 11.
 
-### Step 6 — Spawn designers (stub)
+#### 5b. Designer completion detection
 
-Emit: `tick: skipped step-6-spawn-designers — not yet implemented`
+For each `active_wizards` entry with `mode: design` and `status: running`:
+
+```bash
+test -f state/wizards/<id>/heartbeat && hb=present || hb=absent
+test -f state/wizards/<id>/manifest.yaml && mf=present || mf=absent
+```
+
+Cases:
+- `mf=present, hb=absent` — **completed**:
+  - Read `state/wizards/<id>/manifest.yaml` (parse `epic_linear_id`, `sub_epic_name`, `issues`).
+  - Print to **stdout**:
+    ```
+    Designer <id> completed (sub-epic "<sub_epic_name>"). Linear epic: <epic_linear_id>. <N> issues:
+      - <issue_key> [repos: <r1>, <r2>]
+      - <issue_key> (depends on: <dep>) [repos: <r>]
+    ```
+  - Append to `state/events.log`:
+    ```json
+    {"ts":"...","event":"designer-completed","id":"<id>","epic_linear_id":"<epic-id>","issues":<N>}
+    ```
+  - Update entry: `status: awaiting-tier-3`, `manifest_file: state/wizards/<id>/manifest.yaml`, `epic_linear_id: <id>`.
+  - Emit `tick: skipped tier-3-spawn — not yet implemented`.
+- `mf=absent, hb=absent`:
+  - If `now - started_at < 30s`, too early to judge. Skip.
+  - Otherwise: `status: failed`. Append to `state/escalations.log`:
+    ```yaml
+    - ts: <ISO-8601>
+      wizard_id: <id>
+      mode: design
+      issue_key: null
+      pr_urls: null
+      rule: designer-no-output
+      attempted: |
+        Designer spawned; exited without writing manifest.yaml.
+      needs_from_user: |
+        Inspect state/wizards/<id>/logs/spawn.txt for error output.
+    ```
+- `mf=present, hb=present` — designer just finished writing; wait for next tick.
+- `mf=absent, hb=present` — designer still working. Step 11 handles staleness.
+
+### Step 6 — Spawn designers
+
+For each `active_architects` entry with `status: awaiting-tier-2`:
+
+1. Read `state/architects/<arch-id>/plan.yaml`. Parse `sub_epics` (list of objects with `name`, `mandate`, `repos`, `explorable_repos`, optional `depends_on`).
+
+2. Check concurrency: read `config.yaml:limits.max_concurrent_wizards` (default 3). Count entries with `status: running` across `active_architects + active_wizards`.
+
+3. For each `sub_epic` at index `i` in the list:
+   - If running-count is at the limit: emit `tick: concurrency-limit reached, deferring designer spawn for sub-epic "<name>"` and stop spawning more for this architect (the next tick will pick up).
+   - Otherwise:
+     - Generate UUID: `python3 -c "import uuid; print(uuid.uuid4())"`.
+     - `mkdir -p state/wizards/<wizard-id>/logs`.
+     - Spawn the designer:
+       ```bash
+       nohup bash scripts/spawn-wizard.sh design \
+         --wizard-id <wizard-id> \
+         --architect-plan-file state/architects/<arch-id>/plan.yaml \
+         --sub-epic-index <i> \
+         > state/wizards/<wizard-id>/logs/spawn.txt 2>&1 &
+       echo $!
+       ```
+     - Capture PID.
+     - Append to `active_wizards`:
+       ```yaml
+       - id: <wizard-id>
+         mode: design
+         status: running
+         started_at: <ISO-8601 now>
+         architect_id: <arch-id>
+         sub_epic_index: <i>
+         sub_epic_name: <name from sub_epic>
+         epic_linear_id: null
+         manifest_file: null
+         pid: <pid>
+         respawn_count: 0
+       ```
+     - Append event:
+       ```json
+       {"ts":"...","event":"designer-spawned","id":"<wizard-id>","architect_id":"<arch-id>","sub_epic":"<name>","pid":12345}
+       ```
+     - Increment running-count (for concurrency check on the next sub-epic in this loop).
+
+4. Once ALL sub-epics for an architect have been spawned (or deferred per concurrency), transition the architect's `status` from `awaiting-tier-2` to `completed` ONLY if every sub-epic now has a corresponding `active_wizards` entry. If any were deferred, leave the architect at `awaiting-tier-2` for the next tick to pick up.
 
 ### Step 7 — Poll Linear (stub)
 
@@ -190,19 +287,51 @@ Emit: `tick: skipped step-10-implement-spawn — not yet implemented`
 
 ### Step 11 — Heartbeat poll
 
-For each `running` architect:
+#### 11a. Architects
+
+For each `active_architects` entry with `status: running`:
 
 ```bash
 mtime=$(stat -c %Y state/architects/<id>/heartbeat 2>/dev/null)
 ```
 
-- If `mtime` is empty (file missing): step 5 already classified it; skip here.
+- If `mtime` is empty (file missing): step 5a already classified it; skip here.
 - If `now - mtime > 300` (5 minutes): stale.
-  - `respawn_count == 0`: increment, re-spawn (same `nohup bash scripts/spawn-wizard.sh architect --wizard-id <id> --request-file ...` command), capture new pid, update entry. Append:
+  - `respawn_count == 0`: increment, re-spawn:
+    ```bash
+    nohup bash scripts/spawn-wizard.sh architect \
+      --wizard-id <id> \
+      --request-file state/architects/<id>/request.md \
+      > state/architects/<id>/logs/spawn.txt 2>&1 &
+    echo $!
+    ```
+    Capture new pid. Append:
     ```json
     {"ts":"...","event":"architect-stale-respawn","id":"<id>","new_pid":12345}
     ```
   - `respawn_count >= 1`: `status: failed`. Append to `state/escalations.log` with `rule: stale-heartbeat-second-failure`.
+
+#### 11b. Designer wizards
+
+For each `active_wizards` entry with `mode: design` and `status: running`:
+
+```bash
+mtime=$(stat -c %Y state/wizards/<id>/heartbeat 2>/dev/null)
+```
+
+- If `mtime` is empty (file missing): step 5b already classified it; skip here.
+- If `now - mtime > 300` (5 minutes): stale.
+  - `respawn_count == 0`: increment, re-spawn:
+    ```bash
+    nohup bash scripts/spawn-wizard.sh design \
+      --wizard-id <id> \
+      --architect-plan-file state/architects/<architect_id>/plan.yaml \
+      --sub-epic-index <sub_epic_index> \
+      > state/wizards/<id>/logs/spawn.txt 2>&1 &
+    echo $!
+    ```
+    Capture new pid. Append `designer-stale-respawn` event.
+  - `respawn_count >= 1`: `status: failed`. Append to `state/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: design`.
 
 ### Step 12 — PR-set review (stub)
 
@@ -237,7 +366,7 @@ printf '{"ts":"%s","event":"tick-complete"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" 
 
 Print **exactly one** terminal line summarising the tick:
 ```
-TICK_OK: <N> running, <M> awaiting-tier-2, <K> failed, <R> requests-drained-this-tick
+TICK_OK: <A> architects-running, <D> designers-running, <T2> awaiting-tier-2, <T3> awaiting-tier-3, <F> failed, <R> requests-drained-this-tick
 ```
 
 On any unrecoverable failure: `TICK_FAILED: step <N> — <reason>` instead.
