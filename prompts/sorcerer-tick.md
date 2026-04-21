@@ -398,11 +398,30 @@ Collect the candidate list across all designers. Then in steps 9 and 10, process
 
 Read `config.json:limits.max_concurrent_wizards` (default 3). Count running entries. For each implement candidate from step 8, while running-count is below the cap:
 
+0. **Allowlist gate (hard fail, don't spawn).** Read `config.json:repos` into a set. For each entry in `issue.repos`, verify membership. If ANY of `issue.repos` is NOT in `config.repos`:
+   - Do NOT create worktrees. Do NOT spawn. This is a design-layer contract violation (the designer or architect escaped the sub-epic scope).
+   - Append one JSON line to `.sorcerer/escalations.log`:
+     ```bash
+     jq -nc \
+       --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+       --arg issue_key "<SOR-N>" \
+       --arg designer_id "<designer wizard id>" \
+       --arg rule "issue-repos-outside-allowlist" \
+       --argjson offending '["<offending repo>"]' \
+       --argjson allowed   '["<config.repos>"]' \
+       --arg attempted "Issue requests repos that are not in config.json:repos; refusing to spawn implement wizard." \
+       --arg needs_from_user "Either add the repo to config.json:repos (and the App must be installed on it), or reject this issue in Linear and have the designer re-emit." \
+       '{ts:$ts, wizard_id:null, mode:"coordinator", issue_key:$issue_key, pr_urls:null, rule:$rule, attempted:$attempted, needs_from_user:$needs_from_user, designer_id:$designer_id, offending_repos:$offending, allowed_repos:$allowed}' \
+       >> .sorcerer/escalations.log
+     ```
+   - Emit `tick: blocked <issue_key> — repos outside config.json:repos: <list>` to stdout.
+   - Move on to the next candidate. Do NOT count this as a concurrency slot (no wizard was spawned).
+
 1. Generate UUID: `uuidgen`. This is the implement wizard's id.
 2. Compute the issue dir: `.sorcerer/wizards/<designer-id>/issues/<issue-key>/` (use `issue_key` like `SOR-11` — filesystem-safe).
 3. `mkdir -p <state_dir>/logs <state_dir>/trees`.
 4. Fetch Linear issue: `mcp__plugin_linear_linear__get_issue` with `id=<issue.linear_id>` to get `gitBranchName`. Capture as `branch_name`.
-5. **Ensure bare clones exist** for every repo this issue touches. One call covers all of them; the script is idempotent and auto-mints per-owner tokens:
+5. **Ensure bare clones exist** for every repo this issue touches. One call covers all of them; the script is idempotent, auto-mints per-owner tokens, and itself enforces `explorable_repos` — if step 0 somehow missed a violation, this is the second line of defense and will `exit 1` rather than clone an out-of-allowlist repo:
    ```bash
    bash scripts/ensure-bare-clones.sh <repo1> <repo2> ...
    ```
