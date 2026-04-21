@@ -332,9 +332,15 @@ Emit: `tick: skipped step-7-linear-poll — not yet implemented` (issue state au
 For each `active_wizards` entry with `mode: design` and `status: awaiting-tier-3`:
 
 1. Read its `manifest_file` (`state/wizards/<designer-id>/manifest.yaml`). Parse `issues` (list of `{linear_id, issue_key, repos, merge_order?, depends_on?}`).
-2. For each issue, check if there's already an `active_wizards` entry with `mode: implement` and `issue_linear_id` matching this issue. If yes, skip (already scheduled or running).
-3. Otherwise, the issue is a candidate to spawn implementing.
-4. **Note:** in slice 8 we do NOT honor cross-issue `depends_on` — issues may be implemented in parallel. Slice 9's merge automation enables proper dependency-aware scheduling.
+2. For each issue, check if there's already an `active_wizards` entry with `mode: implement` and `issue_linear_id` matching this issue. If yes, skip (already scheduled or running or done).
+3. **Dependency check.** If the issue has a non-empty `depends_on` list (other `linear_id` or `issue_key` values), verify every dependency is merged before scheduling:
+   - For each `dep` in `depends_on`:
+     - Find the corresponding entry in `active_wizards` (match by `issue_linear_id` or `issue_key` — the manifest may use either).
+     - If not found: look across OTHER designers' manifests (cross-sub-epic dependencies from the architect plan).
+     - If still not found: the dep is outside sorcerer's tracking — treat it as unsatisfied (log `tick: deferring <issue_key> — dep <dep> not found in any manifest`, consider escalating if this persists >3 ticks).
+     - If found but `status` is NOT one of `merged`, `done`, `archived`: dep is unsatisfied. Skip this issue (defer to next tick). Log: `tick: deferring <issue_key> — dep <dep_key> still <status>`.
+   - Only candidates with ALL deps in a merged/done/archived state proceed.
+4. Otherwise (no deps, or all deps satisfied), the issue is a candidate to spawn implementing.
 
 Collect the candidate list across all designers. Then in steps 9 and 10, process candidates subject to the concurrency cap.
 
