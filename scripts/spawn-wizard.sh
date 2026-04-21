@@ -27,17 +27,39 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 MODE="${1:-}"
+shift || true
 case "$MODE" in
   noop|architect|design|implement|feedback) ;;
-  *) echo "Usage: $0 <noop|architect|design|implement|feedback>" >&2; exit 2 ;;
+  *) echo "Usage: $0 <mode> [--request-file <path>] [--model <name>]" >&2
+     echo "Modes: noop, architect, design, implement, feedback" >&2
+     exit 2 ;;
 esac
 
 case "$MODE" in
-  architect|design|implement|feedback)
+  design|implement|feedback)
     echo "ERROR: mode '$MODE' is reserved but not yet implemented" >&2
     exit 1
     ;;
 esac
+
+REQUEST_FILE=""
+MODEL=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --request-file)
+      [[ $# -ge 2 ]] || { echo "ERROR: --request-file requires a value" >&2; exit 2; }
+      REQUEST_FILE="$2"; shift 2 ;;
+    --model)
+      [[ $# -ge 2 ]] || { echo "ERROR: --model requires a value" >&2; exit 2; }
+      MODEL="$2"; shift 2 ;;
+    *) echo "ERROR: unknown flag $1" >&2; exit 2 ;;
+  esac
+done
+
+if [[ "$MODE" == "architect" ]]; then
+  [[ -n "$REQUEST_FILE" ]] || { echo "ERROR: architect mode requires --request-file <path>" >&2; exit 2; }
+  [[ -f "$REQUEST_FILE" ]] || { echo "ERROR: request file not found: $REQUEST_FILE" >&2; exit 2; }
+fi
 
 command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 required" >&2; exit 1; }
 command -v claude  >/dev/null 2>&1 || { echo "ERROR: claude CLI required" >&2; exit 1; }
@@ -57,14 +79,38 @@ HEARTBEAT_FILE="$STATE_DIR/heartbeat"
 ESCALATION_LOG="$REPO_ROOT/state/escalations.log"
 touch "$ESCALATION_LOG"
 
-cat > "$CONTEXT_FILE" <<YAML
-wizard_id: $WIZARD_ID
-mode: $MODE
-heartbeat_file: $HEARTBEAT_FILE
-escalation_log: $ESCALATION_LOG
-state_dir: $STATE_DIR
-max_refer_back_cycles: 5
-YAML
+CONFIG="${SORCERER_CONFIG:-$REPO_ROOT/config.yaml}"
+if [[ "$MODE" == "architect" ]]; then
+  [[ -f "$CONFIG" ]] || { echo "ERROR: architect mode requires config.yaml at $CONFIG" >&2; exit 1; }
+fi
+
+REQUEST_FILE_ABS=""
+[[ -n "$REQUEST_FILE" ]] && REQUEST_FILE_ABS=$(readlink -f "$REQUEST_FILE")
+
+python3 - "$MODE" "$WIZARD_ID" "$HEARTBEAT_FILE" "$ESCALATION_LOG" "$STATE_DIR" "${CONFIG:-/dev/null}" "$REQUEST_FILE_ABS" "$REPO_ROOT" > "$CONTEXT_FILE" <<'PY'
+import sys, yaml
+mode, wizard_id, heartbeat, escalation, state_dir, config_path, request, repo_root = sys.argv[1:9]
+
+ctx = {
+  'wizard_id': wizard_id,
+  'mode': mode,
+  'heartbeat_file': heartbeat,
+  'escalation_log': escalation,
+  'state_dir': state_dir,
+  'max_refer_back_cycles': 5,
+}
+
+if mode == 'architect':
+  with open(config_path) as f:
+    cfg = yaml.safe_load(f) or {}
+  ctx['max_refer_back_cycles'] = cfg.get('limits', {}).get('max_refer_back_cycles', 5)
+  ctx['request_file'] = request
+  ctx['explorable_repos'] = cfg.get('explorable_repos') or []
+  ctx['repos'] = cfg.get('repos') or []
+  ctx['bare_clones_dir'] = f"{repo_root}/repos"
+
+print(yaml.safe_dump(ctx, sort_keys=False, default_flow_style=False), end='')
+PY
 
 case "$MODE" in
   noop)      PROMPT_FILE="$REPO_ROOT/prompts/wizard-noop.md" ;;
@@ -87,21 +133,26 @@ echo "  log:      $LOG_FILE"
 PROMPT="$(cat "$PROMPT_FILE")"
 
 cd "$STATE_DIR"
+
+# Build claude invocation. Notes:
+# - We deliberately do NOT pass --add-dir. The wizard's cwd is its state_dir,
+#   which Claude Code makes accessible by default. Adding --add-dir here would
+#   greedily consume the positional prompt argument as another directory path
+#   and silently fast-exit. Modes that need access to additional directories
+#   (e.g. implement wizards needing worktree paths) should use a `--`
+#   separator to terminate the directory list before the prompt.
+# - stdin is redirected to /dev/null so claude doesn't pause 3s waiting for
+#   piped input.
+EXTRA_ARGS=()
+[[ -n "$MODEL" ]] && EXTRA_ARGS+=(--model "$MODEL")
+
 set +e
-# Note: we deliberately do NOT pass --add-dir. The wizard's cwd is its state_dir,
-# which Claude Code makes accessible by default. Adding --add-dir here would
-# greedily consume the positional prompt argument as another directory path
-# and silently fast-exit. Modes that need access to additional directories
-# (e.g. implement-mode wizards needing worktree paths) should use a `--`
-# separator to terminate the directory list before the prompt.
-#
-# stdin is redirected to /dev/null so claude doesn't pause 3s waiting for
-# piped input.
 SORCERER_CONTEXT_FILE="$CONTEXT_FILE" \
   claude -p \
     --output-format text \
     --permission-mode bypassPermissions \
     --max-budget-usd 1 \
+    "${EXTRA_ARGS[@]}" \
     "$PROMPT" \
   < /dev/null \
   > "$LOG_FILE" 2>&1
