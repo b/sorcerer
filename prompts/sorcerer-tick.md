@@ -604,9 +604,33 @@ For each `active_wizards` entry with `mode: implement` and `status: merging`:
 3. If some PRs merged but some still OPEN after >5 min (compare PR's `updatedAt` or use the `merging` start time): partial-merge state. Append escalation with `rule: partial-merge`. Update status: `blocked`.
 4. If all PRs still OPEN after >5 min: probably required-check failure or branch-protection denied. Append escalation with `rule: merge-blocked`. Update status: `blocked`.
 
-### Step 14 — Cleanup completed wizards (stub)
+### Step 14 — Archive completed wizards after 7-day retention
 
-Emit: `tick: skipped step-14-wizard-cleanup — not yet implemented`
+Terminal-state entries (architects with `status: completed` or `failed`; wizards with `status: merged`, `failed`, or `blocked`) are kept around for 7 days so the operator can inspect them. After that, their state dirs are removed and the entry's `status` transitions to `archived`.
+
+For each `active_architects` entry with `status` in (`completed`, `failed`):
+1. Compute `age_days = (now - started_at) / 1 day`.
+2. If `age_days > 7`:
+   - Resolve the state dir: `state/architects/<id>/`.
+   - Remove it: `rm -rf state/architects/<id>`.
+   - Update entry: `status: archived`. Keep the entry in `active_architects` (renamed to "archived" in spirit; still serves as an audit record with `archived_at` recorded).
+   - Append to `state/events.log`:
+     ```json
+     {"ts":"...","event":"architect-archived","id":"<id>","prior_status":"<completed|failed>"}
+     ```
+
+For each `active_wizards` entry with `status` in (`merged`, `failed`, `blocked`):
+1. Compute `age_days = (now - started_at) / 1 day`.
+2. If `age_days > 7`:
+   - Resolve the state dir. For designer wizards (mode=design): `state/wizards/<id>/`. For implement/feedback wizards (mode=implement with merged/failed/blocked status): the `state_dir` field on the entry (the issue dir).
+   - Remove it: `rm -rf <state_dir>`.
+   - Update entry: `status: archived`, `archived_at: <ISO-8601 now>`.
+   - Append to `state/events.log`:
+     ```json
+     {"ts":"...","event":"wizard-archived","id":"<id>","mode":"<design|implement>","prior_status":"<merged|failed|blocked>"}
+     ```
+
+**Note:** archived entries stay in `sorcerer.yaml` as a historical record but have no state dir on disk. The coordinator never acts on `archived` entries again. If `sorcerer.yaml` grows unwieldy, a follow-up slice can add a secondary rotation (e.g. move archived entries to `state/archive.yaml` after another 30 days).
 
 ### Step 15 — Persist state
 
