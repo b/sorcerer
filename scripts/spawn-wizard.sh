@@ -20,7 +20,8 @@
 #   --issue-meta-file <path>         per-issue meta.yaml (required for implement/feedback);
 #                                    its parent dir is the wizard's state_dir
 #   --state-dir <path>               override the default state_dir computation
-#   --model <name>                   override the default model (e.g. claude-sonnet-4-6)
+#   --model <name>                   override the default model (claude uses opus by default;
+#                                    only downgrade if you've measured the role tolerates it)
 #   --wizard-id <uuid>               use this UUID instead of generating one (lets
 #                                    the coordinator pre-create state/<parent>/<id>/
 #                                    and track sessions by a known id)
