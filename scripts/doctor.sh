@@ -136,18 +136,57 @@ fi
 
 # === Repo access via App token ===
 section "Repo access"
+declare -A REPO_INFO
 if [[ -n "${GITHUB_TOKEN:-}" && -n "$REPOS" ]]; then
   while IFS= read -r repo; do
     [[ -z "$repo" ]] && continue
     repo_no_host="${repo#github.com/}"
-    if gh api "repos/$repo_no_host" >/dev/null 2>&1; then
+    if info=$(gh api "repos/$repo_no_host" 2>/dev/null); then
       ok "App can read $repo"
+      REPO_INFO["$repo_no_host"]="$info"
     else
       no "App cannot read $repo (install the App on this repo)"
     fi
   done <<<"$REPOS"
 else
   warn "skipped — need both a valid GITHUB_TOKEN and a repos list in config.yaml"
+fi
+
+# === Branch protection + auto-merge on each target repo ===
+section "Merge gate (target repos)"
+if [[ ${#REPO_INFO[@]} -gt 0 ]]; then
+  for repo_no_host in "${!REPO_INFO[@]}"; do
+    info="${REPO_INFO[$repo_no_host]}"
+    default_branch=$(jq -r '.default_branch' <<<"$info")
+    auto_merge=$(jq -r '.allow_auto_merge' <<<"$info")
+    delete_branch=$(jq -r '.delete_branch_on_merge' <<<"$info")
+
+    # Branch protection check (works without Administration permission via the basic branches endpoint)
+    if branch_info=$(gh api "repos/$repo_no_host/branches/$default_branch" 2>/dev/null); then
+      protected=$(jq -r '.protected' <<<"$branch_info")
+      if [[ "$protected" == "true" ]]; then
+        ok "$repo_no_host: branch protection on $default_branch"
+      else
+        no "$repo_no_host: $default_branch has NO branch protection (Settings → Branches → Add rule)"
+      fi
+    else
+      no "$repo_no_host: cannot inspect $default_branch (token may lack access)"
+    fi
+
+    if [[ "$auto_merge" == "true" ]]; then
+      ok "$repo_no_host: auto-merge enabled"
+    else
+      no "$repo_no_host: auto-merge disabled (Settings → General → Pull Requests → Allow auto-merge)"
+    fi
+
+    if [[ "$delete_branch" == "true" ]]; then
+      ok "$repo_no_host: head branches auto-deleted on merge"
+    else
+      warn "$repo_no_host: head branches not auto-deleted (cosmetic; sorcerer can pass --delete-branch on merge)"
+    fi
+  done
+else
+  warn "skipped — needs at least one accessible repo from config.yaml"
 fi
 
 # === State + space ===
