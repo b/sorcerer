@@ -1,32 +1,31 @@
 #!/usr/bin/env bash
-# Stop the sorcerer coordinator loop, if running.
-# Sends SIGTERM, waits up to 10s, escalates to SIGKILL if needed.
-# Removes the pid file regardless of how the process exits.
+# Stop the coordinator loop for a project, if running.
 #
-# Note: this stops the COORDINATOR loop, not any in-flight wizard sessions
-# (architect/design/implement). Those run as their own detached processes
-# and will continue to completion or exit on their own. To halt everything,
-# also kill the spawned `claude -p` processes manually.
+# Usage: scripts/stop-coordinator.sh <project-root>
+#
+# Sends SIGTERM, waits up to 10s, escalates to SIGKILL if needed. Removes the
+# pid file regardless of how the process exits. Does not stop any in-flight
+# wizard sessions (they run as independent detached processes).
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
+PROJECT_ROOT="${1:-$(pwd)}"
+[[ -d "$PROJECT_ROOT" ]] || { echo "ERROR: project root not a directory: $PROJECT_ROOT" >&2; exit 1; }
 
-PID_FILE="$REPO_ROOT/state/coordinator.pid"
+PID_FILE="$PROJECT_ROOT/.sorcerer/coordinator.pid"
 
 if [[ ! -f "$PID_FILE" ]]; then
-  echo "Coordinator not running (no pid file)"
+  echo "Coordinator not running for $PROJECT_ROOT (no pid file)"
   exit 0
 fi
 
-pid=$(cat "$PID_FILE" 2>/dev/null || echo)
+pid="$(cat "$PID_FILE" 2>/dev/null || echo)"
 if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
   echo "Coordinator not running (stale pid: $pid)"
   rm -f "$PID_FILE"
   exit 0
 fi
 
-echo "Stopping coordinator (pid $pid)..."
+echo "Stopping coordinator (pid $pid) for $PROJECT_ROOT..."
 kill -TERM "$pid"
 
 for i in {1..10}; do

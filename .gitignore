@@ -1,15 +1,16 @@
-# Runtime state — never commit
+# Per-project sorcerer workspace (state, config, bare clones, logs)
+.sorcerer/
+
+# Legacy layout (pre-slice-15) — still gitignored so migration is safe
 state/
 repos/
+config.yaml
 
 # Local secrets
 .env
 .env.*
 *.private-key.pem
 *.pem
-
-# Per-user config (config.yaml.example is the committed template)
-config.yaml
 
 # Editor / OS junk
 .DS_Store

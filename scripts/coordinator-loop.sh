@@ -1,59 +1,51 @@
 #!/usr/bin/env bash
-# The sorcerer coordinator loop.
+# The sorcerer coordinator loop — runs per project.
 #
-# Runs the tick prompt repeatedly via `claude -p` until there is no pending
-# work in state/sorcerer.yaml, then exits cleanly. /sorcerer re-spawns this
-# loop (via start-coordinator.sh) when new requests arrive.
+# Usage: scripts/coordinator-loop.sh <project-root>
 #
-# Pending work = a file in state/requests/, OR an active_architect with status
-# `pending-architect` or `running`, OR an active_wizard with `pending-design`,
-# `running`, or any other in-flight status. Tier-2/Tier-3 statuses will be
-# added here as those modes ship.
+# Runs the tick prompt repeatedly via `claude -p` in the project's directory
+# until there is no pending work in <project>/.sorcerer/sorcerer.yaml, then
+# exits cleanly. /sorcerer re-spawns this loop (via start-coordinator.sh) when
+# new requests arrive.
 #
-# Sleep interval: 30s when there is in-flight work, 60s when only awaiting-
-# tier-2 entries remain (waiting for the next request → no point ticking
-# fast, but we shouldn't exit since hand-off may come soon).
+# Pending work = a file in .sorcerer/requests/, OR an active entry in
+# .sorcerer/sorcerer.yaml with an in-flight status.
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
+: "${SORCERER_REPO:?SORCERER_REPO must be set}"
+
+PROJECT_ROOT="${1:-$(pwd)}"
+[[ -d "$PROJECT_ROOT" ]] || { echo "ERROR: project root not a directory: $PROJECT_ROOT" >&2; exit 1; }
+cd "$PROJECT_ROOT"
 
 if [[ -f "$HOME/.shell_env" ]]; then
   # shellcheck source=/dev/null
   source "$HOME/.shell_env"
 fi
 
-PID_FILE="$REPO_ROOT/state/coordinator.pid"
-TICK_PROMPT_FILE="$REPO_ROOT/prompts/sorcerer-tick.md"
+PID_FILE="$PROJECT_ROOT/.sorcerer/coordinator.pid"
+TICK_PROMPT_FILE="$SORCERER_REPO/prompts/sorcerer-tick.md"
 
 [[ -f "$TICK_PROMPT_FILE" ]] || { echo "ERROR: missing $TICK_PROMPT_FILE" >&2; exit 1; }
 TICK_PROMPT="$(cat "$TICK_PROMPT_FILE")"
 
-# Always remove the pid file on exit so start-coordinator.sh can spawn a fresh loop next time.
 trap 'rm -f "$PID_FILE"' EXIT
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 has_in_flight_work() {
-  # Returns 0 (true) if there is anything actively progressing OR queued.
-  # Includes:
-  #   - pending-architect / running / pending-design  — sessions about to start or in progress
-  #   - awaiting-tier-2 / awaiting-tier-3             — deferred spawns at concurrency cap
-  #   - awaiting-review                                — step 12 will review on the next tick
-  #   - merging                                        — step 13 will detect merge completion on the next tick
-  # Note: refer-back does NOT introduce a new status — it transitions awaiting-review → running
-  # in the same tick (step 12 spawns the feedback session inline). So no `needs-feedback` etc.
-  # Excludes: merged, failed, blocked (terminal — no more progress without user intervention).
-  if compgen -G "state/requests/*.md" > /dev/null 2>&1; then
+  # See docs/lifecycle.md for the status taxonomy. The loop keeps running as
+  # long as any entry is in a non-terminal state.
+  if compgen -G ".sorcerer/requests/*.md" > /dev/null 2>&1; then
     return 0
   fi
-  if [[ -f state/sorcerer.yaml ]] && grep -qE 'status: (pending-architect|running|awaiting-tier-2|awaiting-tier-3|pending-design|awaiting-review|merging)' state/sorcerer.yaml; then
+  if [[ -f .sorcerer/sorcerer.yaml ]] && grep -qE 'status: (pending-architect|running|awaiting-tier-2|awaiting-tier-3|pending-design|awaiting-review|merging)' .sorcerer/sorcerer.yaml; then
     return 0
   fi
   return 1
 }
 
-echo "[$(ts)] coordinator-loop started (pid $$)"
+echo "[$(ts)] coordinator-loop started (pid $$) for $PROJECT_ROOT"
 
 while true; do
   if ! has_in_flight_work; then
@@ -65,15 +57,14 @@ while true; do
   if ! claude -p \
       --output-format text \
       --permission-mode bypassPermissions \
-      --max-budget-usd 2 \
       --model claude-sonnet-4-6 \
       "$TICK_PROMPT" \
       < /dev/null; then
     echo "[$(ts)] tick exited non-zero"
   fi
 
-  # Sleep interval: 30s when actively running something, 60s otherwise.
-  if [[ -f state/sorcerer.yaml ]] && grep -qE 'status: running' state/sorcerer.yaml; then
+  # Pacing: 30s while anything is actively running, 60s otherwise.
+  if [[ -f .sorcerer/sorcerer.yaml ]] && grep -qE 'status: running' .sorcerer/sorcerer.yaml; then
     sleep 30
   else
     sleep 60
