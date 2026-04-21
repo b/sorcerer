@@ -20,7 +20,7 @@ One iteration of the coordinator loop. Default pacing: 30s with active work, 5mi
    - Otherwise → move to `state/wizards/<id>/request.md`, `mode: design`, status `pending-design`.
 4. **Spawn architect sessions** for every `pending-architect` run. One at a time if `limits.max_concurrent_wizards == 1`.
 5. **Process architect outputs.** For every architect run whose `plan.yaml` is written and heartbeat absent: read `plan.yaml`; for each sub-epic in it, create a new wizard (`state/wizards/<id>/`) with `mode: design`, `scope` = the sub-epic mandate, `architect_plan_file` pointing at the plan. Status `pending-design`.
-6. **Spawn designer wizard sessions** for every `pending-design` wizard.
+6. **Spawn designer wizard sessions** for every `pending-design` wizard whose cross-epic deps are satisfied. A sub-epic with `depends_on: [X, Y]` waits until every issue in sub-epic X's and Y's manifests has merged (or been archived). Strict gate: no parallel design across dependent sub-epics. Sub-epics with no deps spawn as concurrency allows.
 7. **Poll Linear** for every active wizard's epic (`mcp__plugin_linear_linear__list_issues` filtered by project). Detect:
    - Issues newly `In Review` with no pending review → queue for step 11.
    - All children `Done` → mark wizard `cleanup`.
