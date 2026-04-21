@@ -222,6 +222,29 @@ elif mode == 'feedback':
 print(yaml.safe_dump(ctx, sort_keys=False, default_flow_style=False), end='')
 PY
 
+# For architect and design modes, ensure bare clones exist for every repo the
+# wizard will read (explorable_repos ∪ repos). Implement/feedback modes read
+# from pre-existing worktrees; the coordinator's tick step 9 handles their
+# bare-clone creation before creating the worktree.
+if [[ "$MODE" == "architect" || "$MODE" == "design" ]]; then
+  REPO_LIST=$(python3 - "$CONTEXT_FILE" <<'PY'
+import sys, yaml
+with open(sys.argv[1]) as f:
+    ctx = yaml.safe_load(f) or {}
+repos = list((ctx.get('explorable_repos') or []))
+for r in (ctx.get('repos') or []):
+    if r not in repos:
+        repos.append(r)
+for r in repos:
+    print(r)
+PY
+  )
+  if [[ -n "$REPO_LIST" ]]; then
+    # shellcheck disable=SC2086
+    bash "$REPO_ROOT/scripts/ensure-bare-clones.sh" $REPO_LIST
+  fi
+fi
+
 case "$MODE" in
   noop)      PROMPT_FILE="$REPO_ROOT/prompts/wizard-noop.md" ;;
   architect) PROMPT_FILE="$REPO_ROOT/prompts/architect.md" ;;

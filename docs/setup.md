@@ -78,16 +78,9 @@ Repos in `explorable_repos` but not in `repos` need only the App installed — s
 
 ### Bare clones for every explorable repo
 
-Wizards use `git worktree`s off bare clones — one worktree per (issue × affected repo). **user**: create one bare clone per repo in `explorable_repos`:
-```
-mkdir -p repos
-for r in $(yq '.explorable_repos[]' config.yaml); do
-  dir="repos/${r//\//-}.git"
-  [ -d "$dir" ] || git clone --bare "git@github.com:${r#github.com/}.git" "$dir"
-done
-```
+Wizards use `git worktree`s off bare clones — one worktree per (issue × affected repo). **auto**: sorcerer creates each bare clone automatically on first use via `scripts/ensure-bare-clones.sh`, which mints the right per-owner App token and clones over HTTPS. You do nothing. The clones live under `repos/<owner>-<repo>.git/`.
 
-Sorcerer refuses to spawn against a repo without its bare clone. Stale/corrupted bare clones require manual recreation — no auto-heal.
+The doctor reports bare-clone state as a NOTE (not a failure) — it just tells you which ones will be fetched on the next sorcerer run. Stale or corrupted bare clones still require manual recreation (delete the directory; sorcerer will re-clone).
 
 ## Linear access
 
@@ -187,5 +180,4 @@ Fix anything fatal before starting `/loop`.
 - [ ] Configure branch protection + auto-merge on every repo in `repos`.
 - [ ] (Recommended) Connect Linear's GitHub integration.
 - [ ] Fill in `config.yaml` (repos, explorable_repos, team key, models, architect thresholds, limits).
-- [ ] Create bare clones under `repos/<owner>-<repo>.git/` for every repo in `explorable_repos`.
-- [ ] `bash scripts/doctor.sh` passes clean.
+- [ ] `bash scripts/doctor.sh` passes clean (bare clones auto-created on first use; doctor reports pending ones as NOTE).
