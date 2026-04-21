@@ -8,6 +8,12 @@ Sorcerer is an autonomous development system, built from the ground up for work 
 
 This repository currently contains design documentation only. No implementation exists yet.
 
+## User-facing entry point
+
+The user interacts with sorcerer **only** through the `/sorcerer` slash command (defined at `.claude/skills/sorcerer/SKILL.md`). The user types `/sorcerer <description of the system to build or refactor>` and walks away — sorcerer's coordinator handles the rest detached. Manual tick invocation, manual file drops into `state/requests/`, and manual coordinator starts are all regressions and must not be reintroduced.
+
+The `/sorcerer` skill itself does only two things: writes the prompt to a timestamped file under `state/requests/`, and ensures the coordinator is running by calling `scripts/start-coordinator.sh` (idempotent — spawns a detached `scripts/coordinator-loop.sh` if no live coordinator pid).
+
 ## Orientation
 
 Read in order:

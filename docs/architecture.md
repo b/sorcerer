@@ -23,7 +23,7 @@ Sorcerer is prompts, scripts, and state files. No compiled codebase, no daemon, 
 
 | Layer | Implementation |
 |---|---|
-| Coordinator | A Claude Code session driven by the `/loop` skill — one tick = one LLM turn |
+| Coordinator | Detached bash loop (`scripts/coordinator-loop.sh`) running `claude -p` against `prompts/sorcerer-tick.md` repeatedly until no in-flight work remains |
 | Architect sessions | One-shot `claude -p` subprocesses for Tier-1 planning (large requests) |
 | Wizard sessions | Detached `claude -p` subprocesses, spawned per task (design / implement / feedback) |
 | GitHub access | `gh` CLI reading `$GITHUB_TOKEN` on every invocation |
@@ -105,7 +105,7 @@ state/wizards/<id>/
 ## Data flow (happy path)
 
 ```
-user        → sorcerer   : drop feature request in state/requests/
+user        → sorcerer   : type `/sorcerer <prompt>` (writes state/requests/<timestamp>.md, starts coordinator)
 [large request: Tier 1]
 sorcerer    → architect  : spawn (mode=architect); writes design.md + plan.yaml; exits
 sorcerer    → wizard(s)  : spawn one designer per sub-epic in parallel
@@ -162,12 +162,15 @@ Plain files per "Component layout" above. State is recoverable: if `state/` is w
 ## Process model
 
 ### Coordinator
-```
-claude /loop 30s /sorcerer-tick
-```
-- One tick per LLM turn running `prompts/sorcerer-tick.md`.
-- Tick: reconcile state → refresh token if <10min → drain requests (route to architect or designer by size heuristic) → spawn architect sessions → process architect outputs → spawn designer / implement / feedback sessions → heartbeats → PR-set reviews → merge/refer-back/escalate → cleanup → persist.
+A detached bash loop (`scripts/coordinator-loop.sh`) that runs the tick prompt repeatedly via `claude -p`. Started by `scripts/start-coordinator.sh` (which the `/sorcerer` skill calls; idempotent — only spawns a fresh loop when no live coordinator pid exists).
+
+- Each tick is one `claude -p` invocation against `prompts/sorcerer-tick.md`. The session reads state, polls Linear MCP + `gh`, decides actions, executes them, writes state back.
+- Loop sleep interval: 30s while any wizard or architect is `running`, 60s otherwise.
+- The loop **self-exits** when `state/sorcerer.yaml` has no entries with status `pending-architect`, `running`, or `pending-design` (and `state/requests/` is empty). The `/sorcerer` skill spawns a fresh loop the next time a request arrives.
+- Tick logic: reconcile state → refresh token if <10min → drain requests (route to architect or designer by size heuristic) → spawn architect sessions → process architect outputs → spawn designer / implement / feedback sessions → heartbeats → PR-set reviews → merge/refer-back/escalate → cleanup → persist.
 - Idempotent.
+
+`scripts/stop-coordinator.sh` is the kill switch — graceful SIGTERM with SIGKILL fallback after 10s, removes the pid file regardless.
 
 ### Wizard / architect session
 ```
