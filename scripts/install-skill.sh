@@ -81,15 +81,34 @@ else:
     print(f"/sorcerer allow rules already present in {path}")
 PY
 
-echo
-echo "Final step (one-time): set SORCERER_REPO in your shell profile:"
-echo "  echo 'export SORCERER_REPO=$REPO_ROOT' >> ~/.shell_env"
-echo "  source ~/.shell_env"
-echo
-echo "Then in any Claude Code session:  /sorcerer <prompt>"
-echo "(no permission prompts — the submit script is pre-approved)"
+# --- 3. Export SORCERER_REPO into ~/.shell_env if not already there ---
+# Without this, the /sorcerer skill's `bash $SORCERER_REPO/...` expansion
+# fails in any fresh shell.
+SHELL_ENV="$HOME/.shell_env"
+EXPORT_LINE="export SORCERER_REPO=$REPO_ROOT"
 
-if [[ -z "${SORCERER_REPO:-}" ]]; then
-  echo
-  echo "Note: SORCERER_REPO is currently unset in this shell."
+touch "$SHELL_ENV"
+if ! grep -qF "$EXPORT_LINE" "$SHELL_ENV"; then
+  # If an existing SORCERER_REPO export is present with a different path,
+  # leave it and warn — don't silently overwrite.
+  if grep -q '^export SORCERER_REPO=' "$SHELL_ENV"; then
+    existing=$(grep '^export SORCERER_REPO=' "$SHELL_ENV" | head -1)
+    echo "WARN: $SHELL_ENV already has: $existing"
+    echo "      not touching it. If you meant this repo, update manually to:"
+    echo "      $EXPORT_LINE"
+  else
+    echo "" >> "$SHELL_ENV"
+    echo "# Sorcerer repo root — written by scripts/install-skill.sh" >> "$SHELL_ENV"
+    echo "$EXPORT_LINE" >> "$SHELL_ENV"
+    echo "Added SORCERER_REPO export to $SHELL_ENV"
+  fi
+else
+  echo "SORCERER_REPO already exported in $SHELL_ENV"
 fi
+
+echo
+echo "In any Claude Code session:  /sorcerer <prompt>"
+echo "(no permission prompts — the submit script is pre-approved)"
+echo
+echo "If this is a fresh shell, run 'source ~/.shell_env' or open a new terminal"
+echo "so SORCERER_REPO takes effect."

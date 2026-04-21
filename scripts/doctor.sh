@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sorcerer preflight check. Exits 0 if everything required is in place; non-zero on any failure.
-set -uo pipefail
+set -o pipefail   # intentionally NOT -u: associative arrays misbehave with set -u across empty/unset states
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -118,6 +118,9 @@ PY
 fi
 
 # === Bare clones ===
+# As of slice 14, bare clones are auto-created by scripts/ensure-bare-clones.sh
+# on first use. Missing clones are no longer a fatal error — just a NOTE so the
+# operator knows what'll get fetched on the first sorcerer run against a new repo.
 section "Bare clones"
 if [[ -n "$EXPLORABLE" ]]; then
   while IFS= read -r repo; do
@@ -127,7 +130,7 @@ if [[ -n "$EXPLORABLE" ]]; then
     if [[ -d "$bare" ]]; then
       ok "bare clone present for $repo"
     else
-      no "missing bare clone for $repo (expected at $bare)"
+      warn "no bare clone yet for $repo (will auto-create on first use)"
     fi
   done <<<"$EXPLORABLE"
 else

@@ -352,7 +352,11 @@ Read `config.yaml:limits.max_concurrent_wizards` (default 3). Count running entr
 2. Compute the issue dir: `state/wizards/<designer-id>/issues/<issue-key>/` (use `issue_key` like `SOR-11` — filesystem-safe).
 3. `mkdir -p <state_dir>/logs <state_dir>/trees`.
 4. Fetch Linear issue: `mcp__plugin_linear_linear__get_issue` with `id=<issue.linear_id>` to get `gitBranchName`. Capture as `branch_name`.
-5. For each repo in `issue.repos`:
+5. **Ensure bare clones exist** for every repo this issue touches. One call covers all of them; the script is idempotent and auto-mints per-owner tokens:
+   ```bash
+   bash scripts/ensure-bare-clones.sh <repo1> <repo2> ...
+   ```
+6. For each repo in `issue.repos`:
    - Compute the bare clone path: `repos/<owner>-<repo>.git` (slash → dash).
    - Compute the worktree path: `<state_dir>/trees/<owner>-<repo>` (also dash-converted).
    - Create the worktree:
