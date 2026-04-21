@@ -47,16 +47,9 @@ Via `mcp__plugin_linear_linear__save_issue`, one call per issue:
 - `description`: per the template below
 - `labels`: include `wizard:<wizard_id>`
 
-**The `save_issue` response contains TWO different identifying fields. You MUST capture both, because the manifest uses one of each:**
-```json
-{
-  "id": "4be79900-48fa-40ad-9b3c-7ecc903a4e09",   ← Linear UUID (32 hex chars + dashes)
-  "identifier": "SOR-42",                          ← human key (TEAM-NUM)
-  "url": "https://linear.app/...",
-  ...
-}
-```
-The `id` is the long UUID; the `identifier` is the short `SOR-NN` key. They are NOT interchangeable. The manifest's `linear_id` field MUST hold the UUID; the manifest's `issue_key` field MUST hold the identifier. Do not put the same value in both fields.
+**The `save_issue` response's `id` field holds the Linear identifier** (e.g. `"SOR-42"`). There is no separate UUID field for issues — the identifier IS the canonical id from the Linear MCP plugin's perspective. Same goes for `get_issue` and `list_issues`. The `identifier` field, if present, is the same value.
+
+For the manifest, capture this `id` value into both `linear_id` and `issue_key` (they may legitimately hold the same string). Downstream consumers pass it back to `get_issue` (which accepts identifiers natively).
 
 **Issue description template:**
 ```markdown
@@ -85,17 +78,17 @@ Capture each issue's `id` (the Linear UUID, e.g. `4be79900-48fa-40ad-9b3c-7ecc90
 ### 3. `<state_dir>/manifest.yaml` (atomic write)
 
 ```yaml
-epic_linear_id: <linear project UUID — NOT the slug or short name>
+epic_linear_id: <whatever save_project returned in its id field>
 sub_epic_name: <name from the architect's sub-epic>
 issues:
-  - linear_id: <Linear issue UUID, e.g. 4be79900-48fa-40ad-9b3c-7ecc903a4e09 — NOT the identifier>
-    issue_key: <human identifier, e.g. SOR-42>
+  - linear_id: <whatever save_issue returned in its id field, e.g. SOR-42>
+    issue_key: <same as linear_id in current Linear MCP responses; kept for forward compat>
     repos: [<owner/repo>, ...]
     merge_order: [...]          # optional; omit if empty
-    depends_on: [<linear UUIDs>]  # optional; omit if empty
+    depends_on: [<linear ids>]  # optional; omit if empty
 ```
 
-**Critical:** `linear_id` is always a UUID. `issue_key` is always the short human identifier (TEAM-NUM). Confusing them silently breaks downstream `get_issue` lookups and Linear-link rendering.
+**Note:** The Linear MCP currently returns the human identifier (e.g. `SOR-42`) in the `id` field of issue responses — there is no separate UUID. So `linear_id` and `issue_key` will typically hold the same value. That's correct. Both fields are kept so the schema stays stable if the MCP later starts exposing distinct UUIDs.
 
 Write to `<state_dir>/manifest.yaml.tmp`, then `bash -c 'mv "<state_dir>/manifest.yaml.tmp" "<state_dir>/manifest.yaml"'`. The mv is the atomic publish — coordinator detects completion via the canonical path's existence.
 
@@ -114,35 +107,17 @@ Write to `<state_dir>/manifest.yaml.tmp`, then `bash -c 'mv "<state_dir>/manifes
 7. **Touch heartbeat.**
 8. **Create the Linear project** via `mcp__plugin_linear_linear__save_project`. Capture the `id`.
 9. **Touch heartbeat.**
-10. **Create each Linear issue** via `mcp__plugin_linear_linear__save_issue`. After EACH `save_issue` call, look at the response: the `id` field is the Linear UUID (this is `linear_id` in the manifest). The `identifier` field is the human key, e.g. `SOR-42` (this is `issue_key`). Track BOTH in your in-memory issue list — they are different values. Include `wizard:<wizard_id>` in `labels`.
+10. **Create each Linear issue** via `mcp__plugin_linear_linear__save_issue`. After each call, capture the response's `id` field — that's the Linear identifier (e.g. `SOR-42`). Track in your in-memory issue list. Include `wizard:<wizard_id>` in `labels`.
 11. **Touch heartbeat.**
-12. **Pre-write check.** Before constructing the manifest YAML, scan your in-memory issue list. Every entry's `linear_id` must look like a UUID (32 hex chars + dashes — `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`). Every entry's `issue_key` must look like `<TEAM>-<N>`. If `linear_id == issue_key` for any entry, you've conflated `id` and `identifier` from the save_issue response — re-fetch via `mcp__plugin_linear_linear__get_issue` (passing the SOR-N identifier) and use the response's `id` (UUID) as the corrected `linear_id`. Repeat until all entries pass.
-13. **Atomic write of manifest.yaml.** Write to `manifest.yaml.tmp` via the Write tool, then `bash -c 'mv "<state_dir>/manifest.yaml.tmp" "<state_dir>/manifest.yaml"'`.
-14. **Post-write verification (defense in depth).** Run via Bash:
-    ```bash
-    python3 - <<'PY' || { echo "DESIGNER_FAILED: manifest UUIDs invalid (see above)"; exit 1; }
-    import re, sys, yaml
-    m = yaml.safe_load(open("<state_dir>/manifest.yaml"))
-    UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-    bad = []
-    if not UUID.match(str(m.get("epic_linear_id") or "")):
-        bad.append("epic_linear_id=" + str(m.get("epic_linear_id")))
-    for i in (m.get("issues") or []):
-        if not UUID.match(str(i.get("linear_id") or "")):
-            bad.append("issues[].linear_id=" + str(i.get("linear_id")))
-    if bad:
-        print("\n".join(bad), file=sys.stderr)
-        sys.exit(1)
-    PY
-    ```
-    If this fails, the pre-write check (step 12) missed something. Re-fetch via `mcp__plugin_linear_linear__get_issue` and rewrite the manifest before proceeding.
-15. **Clean up scratch worktrees.** For each entry under `<state_dir>/scratch/`:
+12. **Atomic write of manifest.yaml.** Write the YAML to `manifest.yaml.tmp` via the Write tool, then `bash -c 'mv "<state_dir>/manifest.yaml.tmp" "<state_dir>/manifest.yaml"'`. The mv is the atomic publish; coordinator detects completion via `manifest.yaml` existence.
+13. **Verify the file is non-empty.** `bash -c 'test -s <state_dir>/manifest.yaml || { echo "DESIGNER_FAILED: manifest empty"; exit 1; }'`. If non-empty, proceed.
+14. **Clean up scratch worktrees.** For each entry under `<state_dir>/scratch/`:
     ```
     git -C "<bare_clones_dir>/<owner>-<repo>.git" worktree remove "<state_dir>/scratch/<owner>-<repo>"
     ```
     Then `rm -rf "<state_dir>/scratch"`.
-16. **Remove the heartbeat file.**
-17. **Print** `DESIGNER_OK: created epic <linear-project-id> with <N> issues` as your final line (or `DESIGNER_FAILED: ...` if step 14 failed).
+15. **Remove the heartbeat file.**
+16. **Print** `DESIGNER_OK: created epic <linear-project-id> with <N> issues` as your final line (or `DESIGNER_FAILED: ...` if step 13 failed).
 
 ## Style
 

@@ -24,15 +24,32 @@ active_architects:
     pid: <int or null>
     respawn_count: 0
 active_wizards:
+  # Designer wizards (mode=design)
   - id: <uuid>
-    mode: design                # implement | feedback added in later slices
-    status: running | awaiting-tier-3 | failed
+    mode: design
+    status: running | awaiting-tier-3 | completed | failed
     started_at: <ISO-8601>
     architect_id: <parent architect uuid>
     sub_epic_index: <int>
     sub_epic_name: <string>
     epic_linear_id: <id or null>     # set after design completes
     manifest_file: <path or null>    # set after design completes
+    pid: <int or null>
+    respawn_count: 0
+
+  # Implement wizards (mode=implement)
+  - id: <uuid>
+    mode: implement
+    status: running | awaiting-review | failed
+    started_at: <ISO-8601>
+    designer_id: <parent designer wizard uuid>
+    issue_linear_id: <Linear UUID>
+    issue_key: <SOR-N>
+    branch_name: <single branch name across all affected repos>
+    repos: [<owner/repo>, ...]
+    worktree_paths: {<owner/repo>: <abs path>}
+    pr_urls: {<owner/repo>: <pr url>} | null   # set after implement completes
+    state_dir: <issue dir, parent of trees/>
     pid: <int or null>
     respawn_count: 0
 ```
@@ -224,6 +241,48 @@ Cases:
 - `mf=present, hb=present` — designer just finished writing; wait for next tick.
 - `mf=absent, hb=present` — designer still working. Step 11 handles staleness.
 
+#### 5c. Implement completion detection
+
+For each `active_wizards` entry with `mode: implement` and `status: running`:
+
+```bash
+test -f <state_dir>/heartbeat && hb=present || hb=absent
+test -f <state_dir>/pr_urls.json && pr=present || pr=absent
+```
+
+Cases:
+- `pr=present, hb=absent` — **completed**:
+  - Read `<state_dir>/pr_urls.json` (a `{<owner/repo>: <pr url>}` map).
+  - Print to **stdout**:
+    ```
+    Implement <id> completed (<issue_key>). PRs:
+      - <owner/repo>: <pr_url>
+      - <owner/repo>: <pr_url>
+    ```
+  - Append to `state/events.log`:
+    ```json
+    {"ts":"...","event":"implement-completed","id":"<id>","issue_key":"<SOR-N>","pr_count":<N>}
+    ```
+  - Update entry: `status: awaiting-review`, `pr_urls: <map>`.
+  - Emit `tick: skipped pr-set-review — not yet implemented`.
+- `pr=absent, hb=absent`:
+  - If `now - started_at < 30s`, too early. Skip.
+  - Otherwise: `status: failed`. Append to `state/escalations.log`:
+    ```yaml
+    - ts: <ISO-8601>
+      wizard_id: <id>
+      mode: implement
+      issue_key: <SOR-N>
+      pr_urls: null
+      rule: implement-no-output
+      attempted: |
+        Implement spawned; exited without writing pr_urls.json.
+      needs_from_user: |
+        Inspect <state_dir>/logs/spawn.txt for error output.
+    ```
+- `pr=present, hb=present` — wizard just finishing; wait for next tick.
+- `pr=absent, hb=present` — implement still working. Heartbeat staleness handled in step 11c.
+
 ### Step 6 — Spawn designers
 
 For each `active_architects` entry with `status: awaiting-tier-2`:
@@ -269,21 +328,92 @@ For each `active_architects` entry with `status: awaiting-tier-2`:
 
 4. Once ALL sub-epics for an architect have been spawned (or deferred per concurrency), transition the architect's `status` from `awaiting-tier-2` to `completed` ONLY if every sub-epic now has a corresponding `active_wizards` entry. If any were deferred, leave the architect at `awaiting-tier-2` for the next tick to pick up.
 
-### Step 7 — Poll Linear (stub)
+### Step 7 — Poll Linear (stub for slice 8)
 
-Emit: `tick: skipped step-7-linear-poll — not yet implemented`
+Emit: `tick: skipped step-7-linear-poll — not yet implemented` (issue state authoritative source switches to Linear in slice 9 when PR review begins; for now the manifest is enough).
 
-### Step 8 — Decide next issue actions (stub)
+### Step 8 — Decide implement actions
 
-Emit: `tick: skipped step-8-issue-scheduling — not yet implemented`
+For each `active_wizards` entry with `mode: design` and `status: awaiting-tier-3`:
 
-### Step 9 — Worktree prep (stub)
+1. Read its `manifest_file` (`state/wizards/<designer-id>/manifest.yaml`). Parse `issues` (list of `{linear_id, issue_key, repos, merge_order?, depends_on?}`).
+2. For each issue, check if there's already an `active_wizards` entry with `mode: implement` and `issue_linear_id` matching this issue. If yes, skip (already scheduled or running).
+3. Otherwise, the issue is a candidate to spawn implementing.
+4. **Note:** in slice 8 we do NOT honor cross-issue `depends_on` — issues may be implemented in parallel. Slice 9's merge automation enables proper dependency-aware scheduling.
 
-Emit: `tick: skipped step-9-worktree-prep — not yet implemented`
+Collect the candidate list across all designers. Then in steps 9 and 10, process candidates subject to the concurrency cap.
 
-### Step 10 — Spawn implement / feedback (stub)
+### Step 9 — Worktree prep for implement candidates
 
-Emit: `tick: skipped step-10-implement-spawn — not yet implemented`
+Read `config.yaml:limits.max_concurrent_wizards` (default 3). Count running entries. For each implement candidate from step 8, while running-count is below the cap:
+
+1. Generate UUID: `python3 -c "import uuid; print(uuid.uuid4())"`. This is the implement wizard's id.
+2. Compute the issue dir: `state/wizards/<designer-id>/issues/<issue-key>/` (use `issue_key` like `SOR-11` — filesystem-safe).
+3. `mkdir -p <state_dir>/logs <state_dir>/trees`.
+4. Fetch Linear issue: `mcp__plugin_linear_linear__get_issue` with `id=<issue.linear_id>` to get `gitBranchName`. Capture as `branch_name`.
+5. For each repo in `issue.repos`:
+   - Compute the bare clone path: `repos/<owner>-<repo>.git` (slash → dash).
+   - Compute the worktree path: `<state_dir>/trees/<owner>-<repo>` (also dash-converted).
+   - Create the worktree:
+     ```bash
+     git -C <bare-clone-path> worktree add \
+       <worktree-path> \
+       -b <branch_name> \
+       origin/<default-branch-from-config-or-fetched-from-gh>
+     ```
+   - For default branch: read from `gh api repos/<owner>/<repo> -q .default_branch` once per repo (cache during this tick).
+6. Write `<state_dir>/meta.yaml` (use `python3 yaml.safe_dump` for valid YAML):
+   ```yaml
+   issue_linear_id: <Linear UUID>
+   issue_key: <SOR-N>
+   branch_name: <branch_name>
+   default_branch: <main or whatever fetched>
+   repos: [<owner/repo>, ...]
+   worktree_paths:
+     <owner/repo>: <abs path>
+   merge_order: [<owner/repo>, ...]   # optional; from issue.merge_order
+   designer_id: <designer wizard id>
+   manifest_file: <path to designer's manifest>
+   ```
+
+If concurrency cap is hit: stop preparing more candidates; log `tick: concurrency-limit reached, deferring implement spawn for <issue_key>`. Remaining candidates wait for the next tick.
+
+### Step 10 — Spawn implement wizards
+
+For each issue prepared in step 9 (worktrees ready, meta.yaml present):
+
+```bash
+nohup bash scripts/spawn-wizard.sh implement \
+  --wizard-id <implement-wizard-uuid> \
+  --issue-meta-file <state_dir>/meta.yaml \
+  > <state_dir>/logs/spawn.txt 2>&1 &
+echo $!
+```
+
+Capture PID. Append to `active_wizards`:
+```yaml
+- id: <implement-wizard-uuid>
+  mode: implement
+  status: running
+  started_at: <ISO-8601 now>
+  designer_id: <designer-id>
+  issue_linear_id: <Linear UUID>
+  issue_key: <SOR-N>
+  branch_name: <branch_name>
+  repos: [<owner/repo>, ...]
+  worktree_paths: {<owner/repo>: <abs path>}
+  pr_urls: null
+  state_dir: <state_dir>
+  pid: <pid>
+  respawn_count: 0
+```
+
+Append event:
+```json
+{"ts":"...","event":"implement-spawned","id":"<implement-uuid>","issue_key":"<SOR-N>","pid":12345}
+```
+
+After processing all candidates for a designer, if every issue in its manifest has either a corresponding `running` or `awaiting-review` implement wizard, transition the designer's `status` from `awaiting-tier-3` to `completed`. Otherwise leave at `awaiting-tier-3` for the next tick.
 
 ### Step 11 — Heartbeat poll
 
@@ -333,6 +463,27 @@ mtime=$(stat -c %Y state/wizards/<id>/heartbeat 2>/dev/null)
     Capture new pid. Append `designer-stale-respawn` event.
   - `respawn_count >= 1`: `status: failed`. Append to `state/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: design`.
 
+#### 11c. Implement wizards
+
+For each `active_wizards` entry with `mode: implement` and `status: running`:
+
+```bash
+mtime=$(stat -c %Y <state_dir>/heartbeat 2>/dev/null)
+```
+
+- If `mtime` is empty: step 5c handles it. Skip.
+- If `now - mtime > 300`: stale.
+  - `respawn_count == 0`: increment, re-spawn:
+    ```bash
+    nohup bash scripts/spawn-wizard.sh implement \
+      --wizard-id <id> \
+      --issue-meta-file <state_dir>/meta.yaml \
+      > <state_dir>/logs/spawn.txt 2>&1 &
+    echo $!
+    ```
+    Capture new pid. Append `implement-stale-respawn` event.
+  - `respawn_count >= 1`: `status: failed`. Append to `state/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: implement`, `issue_key: <SOR-N>`.
+
 ### Step 12 — PR-set review (stub)
 
 Emit: `tick: skipped step-12-pr-review — not yet implemented`
@@ -366,7 +517,7 @@ printf '{"ts":"%s","event":"tick-complete"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" 
 
 Print **exactly one** terminal line summarising the tick:
 ```
-TICK_OK: <A> architects-running, <D> designers-running, <T2> awaiting-tier-2, <T3> awaiting-tier-3, <F> failed, <R> requests-drained-this-tick
+TICK_OK: <A> architects-running, <D> designers-running, <I> implements-running, <T2> awaiting-tier-2, <T3> awaiting-tier-3, <AR> awaiting-review, <F> failed, <R> requests-drained-this-tick
 ```
 
 On any unrecoverable failure: `TICK_FAILED: step <N> — <reason>` instead.

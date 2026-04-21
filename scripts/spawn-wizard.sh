@@ -7,13 +7,16 @@
 #   noop       — minimal wizard for spawn-machinery testing. No side effects.
 #   architect  — Tier-1 architect (requires --request-file)
 #   design     — Tier-2 designer (requires --architect-plan-file and --sub-epic-index)
-#   implement  — issue implementation (reserved; not yet implemented)
+#   implement  — Tier-3 issue implementation (requires --issue-meta-file)
 #   feedback   — refer-back addressing (reserved; not yet implemented)
 #
 # Flags:
 #   --request-file <path>            request markdown (required for architect)
 #   --architect-plan-file <path>     architect's plan.yaml (required for design)
 #   --sub-epic-index <int>           which sub-epic in the plan (required for design)
+#   --issue-meta-file <path>         per-issue meta.yaml (required for implement);
+#                                    its parent dir is the implement wizard's state_dir
+#   --state-dir <path>               override the default state_dir computation
 #   --model <name>                   override the default model (e.g. claude-sonnet-4-6)
 #   --wizard-id <uuid>               use this UUID instead of generating one (lets
 #                                    the coordinator pre-create state/<parent>/<id>/
@@ -54,7 +57,7 @@ case "$MODE" in
 esac
 
 case "$MODE" in
-  implement|feedback)
+  feedback)
     echo "ERROR: mode '$MODE' is reserved but not yet implemented" >&2
     exit 1
     ;;
@@ -65,6 +68,8 @@ MODEL=""
 WIZARD_ID_OVERRIDE=""
 ARCHITECT_PLAN_FILE=""
 SUB_EPIC_INDEX=""
+ISSUE_META_FILE=""
+STATE_DIR_OVERRIDE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --request-file)
@@ -82,6 +87,12 @@ while [[ $# -gt 0 ]]; do
     --sub-epic-index)
       [[ $# -ge 2 ]] || { echo "ERROR: --sub-epic-index requires a value" >&2; exit 2; }
       SUB_EPIC_INDEX="$2"; shift 2 ;;
+    --issue-meta-file)
+      [[ $# -ge 2 ]] || { echo "ERROR: --issue-meta-file requires a value" >&2; exit 2; }
+      ISSUE_META_FILE="$2"; shift 2 ;;
+    --state-dir)
+      [[ $# -ge 2 ]] || { echo "ERROR: --state-dir requires a value" >&2; exit 2; }
+      STATE_DIR_OVERRIDE="$2"; shift 2 ;;
     *) echo "ERROR: unknown flag $1" >&2; exit 2 ;;
   esac
 done
@@ -97,6 +108,16 @@ if [[ "$MODE" == "design" ]]; then
   [[ -n "$SUB_EPIC_INDEX" ]] || { echo "ERROR: design mode requires --sub-epic-index <int>" >&2; exit 2; }
 fi
 
+if [[ "$MODE" == "implement" ]]; then
+  [[ -n "$ISSUE_META_FILE" ]] || { echo "ERROR: implement mode requires --issue-meta-file <path>" >&2; exit 2; }
+  [[ -f "$ISSUE_META_FILE" ]] || { echo "ERROR: issue meta file not found: $ISSUE_META_FILE" >&2; exit 2; }
+  # Implement mode runs in the issue dir, not the default state/<parent>/<id>/.
+  # The issue dir is the parent of the meta file.
+  if [[ -z "$STATE_DIR_OVERRIDE" ]]; then
+    STATE_DIR_OVERRIDE="$(cd "$(dirname "$ISSUE_META_FILE")" && pwd)"
+  fi
+fi
+
 command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 required" >&2; exit 1; }
 command -v claude  >/dev/null 2>&1 || { echo "ERROR: claude CLI required" >&2; exit 1; }
 
@@ -109,11 +130,15 @@ else
   WIZARD_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
 fi
 
-case "$MODE" in
-  architect) PARENT="state/architects" ;;
-  *)         PARENT="state/wizards" ;;
-esac
-STATE_DIR="$REPO_ROOT/$PARENT/$WIZARD_ID"
+if [[ -n "$STATE_DIR_OVERRIDE" ]]; then
+  STATE_DIR="$STATE_DIR_OVERRIDE"
+else
+  case "$MODE" in
+    architect) PARENT="state/architects" ;;
+    *)         PARENT="state/wizards" ;;
+  esac
+  STATE_DIR="$REPO_ROOT/$PARENT/$WIZARD_ID"
+fi
 mkdir -p "$STATE_DIR/logs"
 mkdir -p "$REPO_ROOT/state"
 
@@ -133,9 +158,12 @@ REQUEST_FILE_ABS=""
 ARCHITECT_PLAN_FILE_ABS=""
 [[ -n "$ARCHITECT_PLAN_FILE" ]] && ARCHITECT_PLAN_FILE_ABS=$(readlink -f "$ARCHITECT_PLAN_FILE")
 
-python3 - "$MODE" "$WIZARD_ID" "$HEARTBEAT_FILE" "$ESCALATION_LOG" "$STATE_DIR" "${CONFIG:-/dev/null}" "$REQUEST_FILE_ABS" "$REPO_ROOT" "$ARCHITECT_PLAN_FILE_ABS" "$SUB_EPIC_INDEX" > "$CONTEXT_FILE" <<'PY'
+ISSUE_META_FILE_ABS=""
+[[ -n "$ISSUE_META_FILE" ]] && ISSUE_META_FILE_ABS=$(readlink -f "$ISSUE_META_FILE")
+
+python3 - "$MODE" "$WIZARD_ID" "$HEARTBEAT_FILE" "$ESCALATION_LOG" "$STATE_DIR" "${CONFIG:-/dev/null}" "$REQUEST_FILE_ABS" "$REPO_ROOT" "$ARCHITECT_PLAN_FILE_ABS" "$SUB_EPIC_INDEX" "$ISSUE_META_FILE_ABS" > "$CONTEXT_FILE" <<'PY'
 import os, sys, yaml
-mode, wizard_id, heartbeat, escalation, state_dir, config_path, request, repo_root, plan_path, sub_epic_index = sys.argv[1:11]
+mode, wizard_id, heartbeat, escalation, state_dir, config_path, request, repo_root, plan_path, sub_epic_index, meta_path = sys.argv[1:12]
 
 ctx = {
   'wizard_id': wizard_id,
@@ -175,6 +203,16 @@ elif mode == 'design':
   ctx['repos'] = sub_epic.get('repos') or []
   ctx['explorable_repos'] = sub_epic.get('explorable_repos') or []
   ctx['bare_clones_dir'] = f"{repo_root}/repos"
+
+elif mode == 'implement':
+  with open(meta_path) as f:
+    meta = yaml.safe_load(f) or {}
+  for k in ('issue_linear_id', 'issue_key', 'branch_name', 'default_branch', 'repos', 'worktree_paths'):
+    if k not in meta:
+      sys.exit(f"ERROR: meta file missing required field '{k}'")
+    ctx[k] = meta[k]
+  if 'merge_order' in meta:
+    ctx['merge_order'] = meta['merge_order']
 
 print(yaml.safe_dump(ctx, sort_keys=False, default_flow_style=False), end='')
 PY
