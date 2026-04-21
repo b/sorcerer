@@ -4,12 +4,38 @@ You are running as the sorcerer coordinator. Each invocation is one execution of
 
 ## Rules
 
-- Use ONLY the Read, Write, and Bash tools. No Linear MCP, no GitHub MCP — Tier-2+ steps that need them are stubbed.
+- Use ONLY the Read, Write, Bash, and (where noted) `PushNotification` + `mcp__plugin_linear_linear__*` tools. No GitHub MCP — Tier-2+ steps that need it are stubbed.
 - Your cwd is the sorcerer repo root. Every path below is relative to it.
 - Read `config.yaml` for tunables (`limits.max_concurrent_wizards`, `architect.auto_threshold`).
 - The tick is idempotent — every action is guarded by status checks. Repeating or dropping a tick is safe.
 - Write `.sorcerer/sorcerer.yaml` via `python3 yaml.safe_dump` (NOT bash heredocs) so all field values serialize correctly.
 - Stay terse. After each step emit a one-line status (e.g. `step 3: drained 1 request`). On unrecoverable failure print `TICK_FAILED: step <N> — <reason>` and stop.
+
+## User notifications (PushNotification)
+
+The user is not watching the terminal between ticks — events.log is attached only when they run `/sorcerer attach`. To pull their attention back when something meaningful happens, fire the `PushNotification` tool — but ONLY for milestone events, never for routine progress.
+
+**Notify on (one PushNotification per event, per tick):**
+- `architect-completed` — the plan is ready, sub-epic fan-out is imminent. Message: `sorcerer: plan ready — <N> sub-epics. <first sub-epic name>…`
+- `issue-merged` — a unit of work shipped. Message: `sorcerer: merged <issue_key> — "<short issue title>" (<N> PR(s))`. Fetch the Linear issue title via `mcp__plugin_linear_linear__get_issue` once per merged issue if you don't already have it in memory.
+- `review-refer-back` — the LLM gate found fixable problems; a feedback cycle is starting. Message: `sorcerer: referred back <issue_key> (cycle <N>) — <one-line reason>`.
+- Any new line appended to `.sorcerer/escalations.log` this tick. Message: `sorcerer: escalation — <rule> (<issue_key or wizard id>). /sorcerer status for details`.
+- Coordinator exit condition satisfied at the end of this tick (no in-flight work, loop will terminate) AND at least one issue was merged during this coordinator's lifetime. Message: `sorcerer: all work complete — <N> issues merged. coordinator exiting`. Skip if nothing ever merged (nothing to celebrate).
+
+**Do NOT notify on:**
+- `token-refreshed`, `tick-complete`
+- `architect-spawned`, `designer-spawned`, `implement-spawned`, `*-stale-respawn`
+- `designer-completed`, `implement-completed`, `feedback-completed`, `review-merge`, `wizard-archived`, `architect-archived`
+- Any concurrency-deferred log line.
+- Any "skipped step-N" stub log line.
+
+**Formatting:**
+- One line, under 200 chars (mobile truncates). No markdown.
+- Lead with what the user would act on, not a timestamp or id first.
+- Pass `status: "proactive"`.
+- If the tool call returns that the push wasn't sent, that's fine — ignore and continue.
+
+If the `PushNotification` tool is unavailable in this tick's environment, skip the call silently. Never let a notification failure change the tick's outcome.
 
 ## State files
 

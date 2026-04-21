@@ -73,6 +73,15 @@ case "$ARG" in
   attach)
     exec bash "$SORCERER_REPO/scripts/sorcerer-attach.sh" "$PROJECT_ROOT"
     ;;
+  log)
+    EVENTS="$PROJECT_ROOT/.sorcerer/events.log"
+    if [[ ! -f "$EVENTS" ]]; then
+      echo "No events logged yet for $PROJECT_ROOT."
+      exit 0
+    fi
+    python3 "$SORCERER_REPO/scripts/format-event.py" < "$EVENTS"
+    exit 0
+    ;;
   "")
     cat >&2 <<'EOF'
 Usage:
@@ -80,6 +89,7 @@ Usage:
   /sorcerer stop                                                — stop the coordinator
   /sorcerer status                                              — show current state
   /sorcerer attach                                              — reattach to a running coordinator
+  /sorcerer log                                                 — print full formatted event history
 
 Sorcerer is for ambitious work — a new service, a cross-repo refactor, a
 multi-component feature. Describe the desired end state; the architect will
