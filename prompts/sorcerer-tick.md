@@ -312,42 +312,56 @@ For each `active_architects` entry with `status: awaiting-tier-2`:
 
 2. Check concurrency: read `config.yaml:limits.max_concurrent_wizards` (default 3). Count entries with `status: running` across `active_architects + active_wizards`.
 
-3. For each `sub_epic` at index `i` in the list:
-   - If running-count is at the limit: emit `tick: concurrency-limit reached, deferring designer spawn for sub-epic "<name>"` and stop spawning more for this architect (the next tick will pick up).
-   - Otherwise:
-     - Generate UUID: `python3 -c "import uuid; print(uuid.uuid4())"`.
-     - `mkdir -p .sorcerer/wizards/<wizard-id>/logs`.
-     - Spawn the designer:
-       ```bash
-       nohup bash scripts/spawn-wizard.sh design \
-         --wizard-id <wizard-id> \
-         --architect-plan-file .sorcerer/architects/<arch-id>/plan.yaml \
-         --sub-epic-index <i> \
-         > .sorcerer/wizards/<wizard-id>/logs/spawn.txt 2>&1 &
-       echo $!
-       ```
-     - Capture PID.
-     - Append to `active_wizards`:
-       ```yaml
-       - id: <wizard-id>
-         mode: design
-         status: running
-         started_at: <ISO-8601 now>
-         architect_id: <arch-id>
-         sub_epic_index: <i>
-         sub_epic_name: <name from sub_epic>
-         epic_linear_id: null
-         manifest_file: null
-         pid: <pid>
-         respawn_count: 0
-       ```
-     - Append event:
-       ```json
-       {"ts":"...","event":"designer-spawned","id":"<wizard-id>","architect_id":"<arch-id>","sub_epic":"<name>","pid":12345}
-       ```
-     - Increment running-count (for concurrency check on the next sub-epic in this loop).
+3. **Cross-epic dependency helper.** Define `sub_epic_fully_merged(arch_id, sub_epic_name)` for use below. A sub-epic is "fully merged" when its designer has completed AND every issue in its manifest has a corresponding implement wizard whose status is `merged` or `archived`:
 
-4. Once ALL sub-epics for an architect have been spawned (or deferred per concurrency), transition the architect's `status` from `awaiting-tier-2` to `completed` ONLY if every sub-epic now has a corresponding `active_wizards` entry. If any were deferred, leave the architect at `awaiting-tier-2` for the next tick to pick up.
+   - Find the `active_wizards` entry with `mode: design`, `architect_id == arch_id`, and `sub_epic_name == <name>`.
+     - If missing, or `manifest_file` is null, or status is not one of `completed | archived`: return **false** (the dep hasn't even finished designing).
+   - Read that entry's `manifest_file`. For each issue in `manifest.issues`:
+     - Find the `active_wizards` entry with `mode: implement` and `issue_linear_id == issue.linear_id` (fall back to `issue_key` match if needed).
+     - If missing, or status is not one of `merged | archived`: return **false**.
+   - If every issue passed: return **true**.
+
+4. For each `sub_epic` at index `i` in the list:
+   - **Skip if already spawned.** If any `active_wizards` entry matches `architect_id == <arch-id>` and `sub_epic_name == <name>`, move on (re-entry safety).
+   - **Cross-epic dep gate (strict).** If `sub_epic.depends_on` is non-empty, resolve each `dep_name` against the plan's `sub_epics` list (match by `name`). For each resolved dep:
+     - If the dep is not found in the plan at all: append to `.sorcerer/escalations.log` with `rule: sub-epic-dep-not-in-plan`, `wizard_id: null`, a short explanation, and skip this sub-epic for this tick (don't spawn; next tick re-evaluates but an operator should inspect).
+     - Otherwise call `sub_epic_fully_merged(<arch-id>, <dep_name>)`. If it returns **false**: emit `tick: deferring designer spawn for sub-epic "<name>" — dep "<dep_name>" not yet fully merged` and skip this sub-epic for this tick.
+   - If all deps are satisfied (or there were none), proceed:
+     - **Concurrency check.** If running-count is at the limit: emit `tick: concurrency-limit reached, deferring designer spawn for sub-epic "<name>"` and stop evaluating further sub-epics for this architect (the next tick will pick up).
+     - Otherwise:
+       - Generate UUID: `python3 -c "import uuid; print(uuid.uuid4())"`.
+       - `mkdir -p .sorcerer/wizards/<wizard-id>/logs`.
+       - Spawn the designer:
+         ```bash
+         nohup bash scripts/spawn-wizard.sh design \
+           --wizard-id <wizard-id> \
+           --architect-plan-file .sorcerer/architects/<arch-id>/plan.yaml \
+           --sub-epic-index <i> \
+           > .sorcerer/wizards/<wizard-id>/logs/spawn.txt 2>&1 &
+         echo $!
+         ```
+       - Capture PID.
+       - Append to `active_wizards`:
+         ```yaml
+         - id: <wizard-id>
+           mode: design
+           status: running
+           started_at: <ISO-8601 now>
+           architect_id: <arch-id>
+           sub_epic_index: <i>
+           sub_epic_name: <name from sub_epic>
+           epic_linear_id: null
+           manifest_file: null
+           pid: <pid>
+           respawn_count: 0
+         ```
+       - Append event:
+         ```json
+         {"ts":"...","event":"designer-spawned","id":"<wizard-id>","architect_id":"<arch-id>","sub_epic":"<name>","pid":12345}
+         ```
+       - Increment running-count (for concurrency check on the next sub-epic in this loop).
+
+5. Once ALL sub-epics for an architect have been evaluated, transition the architect's `status` from `awaiting-tier-2` to `completed` ONLY if every sub-epic now has a corresponding `active_wizards` entry. If any were deferred for concurrency OR unsatisfied cross-epic deps, leave the architect at `awaiting-tier-2` for the next tick to re-evaluate.
 
 ### Step 7 — Poll Linear (stub for slice 8)
 

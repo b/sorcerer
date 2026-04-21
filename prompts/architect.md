@@ -36,7 +36,7 @@ Read your context file at `$SORCERER_CONTEXT_FILE` (YAML). Required fields:
          <multi-line: what this sub-epic owns, and what it explicitly does NOT own>
        repos: [<owner/repo>, ...]
        explorable_repos: [<subset of architect's explorable_repos>]
-       depends_on: [<other sub-epic names>]   # optional, omit if empty
+       depends_on: [<other sub-epic names>]   # optional, omit if empty. STRICT gate: a sub-epic listed here must be fully merged before the dependent sub-epic's designer can even begin. Only declare a dep when the dependent sub-epic genuinely cannot be designed or implemented without the other's merged code — otherwise it needlessly serializes work.
    cross_sub_epic_contracts: |
      <interfaces and invariants sub-epics must honor between each other; empty string if none>
    ```
