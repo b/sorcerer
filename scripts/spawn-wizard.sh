@@ -5,10 +5,17 @@
 #
 # Modes:
 #   noop       — minimal wizard for spawn-machinery testing. No side effects.
-#   architect  — Tier-1 architect (reserved; not yet implemented)
+#   architect  — Tier-1 architect (requires --request-file)
 #   design     — Tier-2 designer (reserved; not yet implemented)
 #   implement  — issue implementation (reserved; not yet implemented)
 #   feedback   — refer-back addressing (reserved; not yet implemented)
+#
+# Flags:
+#   --request-file <path>   request markdown (required for architect)
+#   --model <name>          override the default model (e.g. claude-sonnet-4-6)
+#   --wizard-id <uuid>      use this UUID instead of generating one (lets the
+#                           coordinator pre-create state/<parent>/<id>/ and
+#                           track sessions by a known id)
 #
 # Runs the wizard synchronously and returns its exit code. Callers that want
 # detached execution should wrap with `nohup ... &` or equivalent — the
@@ -25,6 +32,15 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+
+# Source the coordinator's token cache if present, so $GITHUB_TOKEN reaches the
+# claude -p subprocess without the coordinator having to export it inline.
+# The coordinator writes this file via `bash scripts/refresh-token.sh > state/.token-env`.
+TOKEN_ENV="$REPO_ROOT/state/.token-env"
+if [[ -f "$TOKEN_ENV" ]]; then
+  # shellcheck source=/dev/null
+  source "$TOKEN_ENV"
+fi
 
 MODE="${1:-}"
 shift || true
@@ -44,6 +60,7 @@ esac
 
 REQUEST_FILE=""
 MODEL=""
+WIZARD_ID_OVERRIDE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --request-file)
@@ -52,6 +69,9 @@ while [[ $# -gt 0 ]]; do
     --model)
       [[ $# -ge 2 ]] || { echo "ERROR: --model requires a value" >&2; exit 2; }
       MODEL="$2"; shift 2 ;;
+    --wizard-id)
+      [[ $# -ge 2 ]] || { echo "ERROR: --wizard-id requires a value" >&2; exit 2; }
+      WIZARD_ID_OVERRIDE="$2"; shift 2 ;;
     *) echo "ERROR: unknown flag $1" >&2; exit 2 ;;
   esac
 done
@@ -64,7 +84,14 @@ fi
 command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 required" >&2; exit 1; }
 command -v claude  >/dev/null 2>&1 || { echo "ERROR: claude CLI required" >&2; exit 1; }
 
-WIZARD_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
+# UUID: caller-supplied (--wizard-id) takes precedence so the coordinator can
+# pre-create state/<parent>/<id>/ and track the session by a known id without
+# parsing this script's stdout. mkdir -p below is idempotent either way.
+if [[ -n "$WIZARD_ID_OVERRIDE" ]]; then
+  WIZARD_ID="$WIZARD_ID_OVERRIDE"
+else
+  WIZARD_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
+fi
 
 case "$MODE" in
   architect) PARENT="state/architects" ;;
