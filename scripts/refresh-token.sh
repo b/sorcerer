@@ -32,20 +32,29 @@ need() { command -v "$1" >/dev/null 2>&1 || err "missing required command: $1"; 
 INSTALLATION_ID="${GH_APP_INSTALLATION_ID:-}"
 INSTALLATION_OWNER="${GH_APP_INSTALLATION_OWNER:-}"
 TOKEN_ONLY=0
+OWNER_EXPLICIT=0
+ID_EXPLICIT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --installation-id)
       [[ $# -ge 2 ]] || err "--installation-id requires a value"
-      INSTALLATION_ID="$2"; shift 2 ;;
+      INSTALLATION_ID="$2"; ID_EXPLICIT=1; shift 2 ;;
     --installation-owner)
       [[ $# -ge 2 ]] || err "--installation-owner requires a value"
-      INSTALLATION_OWNER="$2"; shift 2 ;;
+      INSTALLATION_OWNER="$2"; OWNER_EXPLICIT=1; shift 2 ;;
     --token-only) TOKEN_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) err "unknown option: $1" ;;
   esac
 done
+
+# If --installation-owner was passed explicitly and the caller didn't ALSO pass
+# --installation-id, clear any pre-existing INSTALLATION_ID from env. Otherwise
+# the env-inherited id silently wins and the owner filter is never consulted.
+if [[ "$OWNER_EXPLICIT" == "1" && "$ID_EXPLICIT" == "0" ]]; then
+  INSTALLATION_ID=""
+fi
 
 need curl
 need jq
