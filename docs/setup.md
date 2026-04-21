@@ -11,6 +11,7 @@ Hard requirements. `scripts/doctor.sh` refuses to pass if any is missing.
 - `claude` CLI 2.1.1+.
 - `gh` CLI 2.40+.
 - `jq`, `curl`, `openssl`, `python3` (used by `scripts/refresh-token.sh` and `scripts/doctor.sh`).
+- `shellcheck` (used by `scripts/lint.sh`).
 - **Linear MCP server** installed and connected in Claude Code (`claude mcp list` shows Linear with `✓ Connected`).
 - **GitHub App** installed on every repo in both `repos` and `explorable_repos`, with a private key on disk and the refresh script wired up.
 - Anthropic API key accessible to `claude`.
@@ -178,7 +179,7 @@ Fix anything fatal before starting `/loop`.
 
 ## One-time checklist
 
-- [ ] Install `git`, `claude`, `gh`, `jq`, `curl`, `openssl`.
+- [ ] Install `git`, `claude`, `gh`, `jq`, `curl`, `openssl`, `shellcheck`.
 - [ ] Confirm Linear MCP connected.
 - [ ] Create a GitHub App with the permissions above; install on every repo in `explorable_repos`; save private key at mode 600.
 - [ ] Export `GH_APP_CLIENT_ID`, `GH_APP_APP_ID`, `GH_APP_PRIVATE_KEY_PATH` in shell profile.
