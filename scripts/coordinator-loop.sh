@@ -36,10 +36,12 @@ ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 has_in_flight_work() {
   # Returns 0 (true) if there is anything actively progressing OR queued.
+  # Includes awaiting-tier-2 because tick step 6 may have deferred designer
+  # spawns due to the concurrency cap; the next tick must pick them up.
   if compgen -G "state/requests/*.md" > /dev/null 2>&1; then
     return 0
   fi
-  if [[ -f state/sorcerer.yaml ]] && grep -qE 'status: (pending-architect|running|pending-design)' state/sorcerer.yaml; then
+  if [[ -f state/sorcerer.yaml ]] && grep -qE 'status: (pending-architect|running|awaiting-tier-2|pending-design)' state/sorcerer.yaml; then
     return 0
   fi
   return 1
