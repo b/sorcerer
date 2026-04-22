@@ -39,6 +39,37 @@ The user is not watching the terminal between ticks — events.log is attached o
 
 If the `PushNotification` tool is unavailable in this tick's environment, skip the call silently. Never let a notification failure change the tick's outcome.
 
+## Process liveness (dead-pid detection)
+
+Every spawn captures the `bash scripts/spawn-wizard.sh ...` subprocess PID into the entry's `pid` field. When that subprocess exits — cleanly, on crash, or on kill — the PID is no longer alive. An on-disk `heartbeat` file from an earlier phase of the run can linger AFTER the process dies, so `test -f heartbeat` alone isn't sufficient to conclude "wizard is still working."
+
+**Helper used throughout step 5 and step 11**:
+
+```bash
+# Returns 0 if the entry is still an active OS process, 1 if the PID is gone.
+is_pid_alive() {
+  local pid="$1"
+  [[ -n "$pid" && "$pid" != "null" ]] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+```
+
+**Usage in step 5 case-classification**: before applying the heartbeat-based cases below, compute an *effective* heartbeat state:
+
+```bash
+test -f <heartbeat> && hb_file=present || hb_file=absent
+if is_pid_alive "<pid>"; then
+  hb="$hb_file"
+else
+  # Process is gone. Any heartbeat file is leftover from before the crash.
+  # Force the classifier into marker-based mode so we don't wait 5 minutes
+  # for step 11's staleness gate to pick up a dead wizard.
+  hb=absent
+fi
+```
+
+From here the existing `hb=present` / `hb=absent` branches work unchanged — a dead PID with a leftover heartbeat routes through the same paths as a clean "heartbeat was removed on exit".
+
 ## Rate-limit (429) handling
 
 Every wizard spawn is a `claude -p` subprocess. When Anthropic's quota throttles, claude auto-retries up to 10 times internally; if it still can't get through, it exits non-zero and the log contains one of:
@@ -240,8 +271,10 @@ If at the concurrency ceiling, emit `tick: concurrency-limit reached, deferring 
 For each `active_architects` entry with `status: running`:
 
 ```bash
-test -f .sorcerer/architects/<id>/heartbeat && hb=present || hb=absent
+test -f .sorcerer/architects/<id>/heartbeat && hb_file=present || hb_file=absent
 test -f .sorcerer/architects/<id>/plan.json && pl=present || pl=absent
+# Force hb=absent when the spawn pid is gone (see "Process liveness").
+if is_pid_alive "<pid>"; then hb="$hb_file"; else hb=absent; fi
 ```
 
 Cases:
@@ -280,8 +313,9 @@ Cases:
 For each `active_wizards` entry with `mode: design` and `status: running`:
 
 ```bash
-test -f .sorcerer/wizards/<id>/heartbeat && hb=present || hb=absent
+test -f .sorcerer/wizards/<id>/heartbeat && hb_file=present || hb_file=absent
 test -f .sorcerer/wizards/<id>/manifest.json && mf=present || mf=absent
+if is_pid_alive "<pid>"; then hb="$hb_file"; else hb=absent; fi
 ```
 
 Cases:
@@ -321,8 +355,9 @@ Cases:
 For each `active_wizards` entry with `mode: implement` (covers both initial implement and any subsequent feedback cycles — the mode stays implement; feedback is a spawn phase) and `status: running`:
 
 ```bash
-test -f <state_dir>/heartbeat && hb=present || hb=absent
+test -f <state_dir>/heartbeat && hb_file=present || hb_file=absent
 test -f <state_dir>/pr_urls.json && pr=present || pr=absent
+if is_pid_alive "<pid>"; then hb="$hb_file"; else hb=absent; fi
 # Determine which spawn is running by reading the most recent log file's last line.
 # Logs: logs/spawn.txt for initial implement; logs/feedback-<N>.txt for feedback cycle N;
 # logs/rebase-<N>.txt for rebase cycle N.
