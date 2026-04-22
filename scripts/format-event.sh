@@ -41,6 +41,14 @@ jq -r '
       "Rebase needed (cycle \(.cycle)): \(.issue_key) — \((.offending_repos // []) | join(", "))"
     elif $e == "rebase-completed" then
       "Rebase cycle \(.cycle) done on \(.issue_key); re-queueing for review"
+    elif $e == "wizard-throttled" then
+      "Throttled (\(.mode) \(short(.id))): retry after \(.retry_after)"
+    elif $e == "wizard-resumed" then
+      "Resumed (\(.mode) \(short(.id))) after throttle #\(.throttle_count)"
+    elif $e == "coordinator-paused" then
+      "Coordinator paused until \(.paused_until) — \(.reason)"
+    elif $e == "coordinator-resumed" then
+      "Coordinator resumed"
     elif $e == "issue-merged" then
       "Merged and cleaned up: \(.issue_key)"
     elif $e == "wizard-archived" then

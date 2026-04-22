@@ -221,7 +221,7 @@ Any of:
 Strict list. Anything not on it is handled autonomously.
 
 1. **Invalid credentials.** `gh api /user` 401 *and* `refresh-token.sh` cannot mint a replacement. Or persistent Linear MCP auth errors.
-2. **API quota exhausted past backoff** — >1hr.
+2. **API quota exhausted past backoff.** The coordinator detects HTTP 429 in a wizard log and marks the entry `throttled` (not `failed`); it auto-respawns after `retry_after` (5 min default) without incrementing `respawn_count`. Three throttles for the same entry → escalation (`rule: persistent-throttle`). Three throttles across different entries in one tick → global `paused_until` set to now+15min; `scripts/coordinator-loop.sh` honors it and sleeps through the window before the next tick. After 1hr of sustained throttling the operator is notified.
 3. **Branch protection blocks merge** — 422 with every required check green.
 4. **Refer-back cap reached** — concerns remain at `max_refer_back_cycles`.
 5. **Security-flagged diff** — LLM reviewer `severity: high`, category `security`.
