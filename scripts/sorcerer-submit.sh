@@ -324,7 +324,7 @@ EOF
         architect:          "xhigh",
         designer:           "xhigh",
         executor:           "high",
-        reviewer:           "max",
+        reviewer:           "xhigh",
         reviewer_architect: "max",
         reviewer_design:    "max"
       },
