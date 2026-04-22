@@ -44,6 +44,7 @@ has_in_flight_work() {
       [entries[].status] | any(
         . == "pending-architect" or
         . == "running"           or
+        . == "throttled"         or
         . == "awaiting-tier-2"   or
         . == "awaiting-tier-3"   or
         . == "pending-design"    or
@@ -61,6 +62,23 @@ while true; do
   if ! has_in_flight_work; then
     echo "[$(ts)] no in-flight work; exiting"
     exit 0
+  fi
+
+  # Honor a global pause set by the tick when too many rate-limit (429) errors
+  # pile up. paused_until is an ISO-8601 timestamp; we sleep in 30s chunks so
+  # a newly-arrived request or user Ctrl-C still gets noticed promptly.
+  if [[ -f .sorcerer/sorcerer.json ]]; then
+    paused_until=$(jq -r '.paused_until // ""' .sorcerer/sorcerer.json 2>/dev/null || echo "")
+    if [[ -n "$paused_until" ]]; then
+      now_epoch=$(date +%s)
+      pause_epoch=$(date -d "$paused_until" +%s 2>/dev/null || echo 0)
+      if (( pause_epoch > now_epoch )); then
+        remain=$(( pause_epoch - now_epoch ))
+        echo "[$(ts)] coordinator paused until $paused_until ($remain s remaining); sleeping"
+        sleep $(( remain < 30 ? remain : 30 ))
+        continue
+      fi
+    fi
   fi
 
   echo "[$(ts)] running tick"

@@ -20,12 +20,14 @@ The user is not watching the terminal between ticks — events.log is attached o
 - `issue-merged` — a unit of work shipped. Message: `sorcerer: merged <issue_key> — "<short issue title>" (<N> PR(s))`. Fetch the Linear issue title via `mcp__plugin_linear_linear__get_issue` once per merged issue if you don't already have it in memory.
 - `review-refer-back` — the LLM gate found fixable problems; a feedback cycle is starting. Message: `sorcerer: referred back <issue_key> (cycle <N>) — <one-line reason>`.
 - Any new line appended to `.sorcerer/escalations.log` this tick. Message: `sorcerer: escalation — <rule> (<issue_key or wizard id>). /sorcerer status for details`.
+- `coordinator-paused` event (new `paused_until` set this tick due to rate-limit storm). Message: `sorcerer: paused ~15m — rate limit hit on <N> spawns. Will auto-resume`.
 - Coordinator exit condition satisfied at the end of this tick (no in-flight work, loop will terminate) AND at least one issue was merged during this coordinator's lifetime. Message: `sorcerer: all work complete — <N> issues merged. coordinator exiting`. Skip if nothing ever merged (nothing to celebrate).
 
 **Do NOT notify on:**
 - `token-refreshed`, `tick-complete`
 - `architect-spawned`, `designer-spawned`, `implement-spawned`, `*-stale-respawn`
 - `designer-completed`, `implement-completed`, `feedback-completed`, `review-merge`, `wizard-archived`, `architect-archived`
+- `wizard-throttled`, `wizard-resumed`, `coordinator-resumed` — individual throttles are routine recoverable events; only the coordinator-level `coordinator-paused` warrants attention.
 - Any concurrency-deferred log line.
 - Any "skipped step-N" stub log line.
 
@@ -37,27 +39,58 @@ The user is not watching the terminal between ticks — events.log is attached o
 
 If the `PushNotification` tool is unavailable in this tick's environment, skip the call silently. Never let a notification failure change the tick's outcome.
 
+## Rate-limit (429) handling
+
+Every wizard spawn is a `claude -p` subprocess. When Anthropic's quota throttles, claude auto-retries up to 10 times internally; if it still can't get through, it exits non-zero and the log contains one of:
+
+- `API Error: Request rejected (429)`
+- `"type": "rate_limit_error"`
+- `rate limit` (case-insensitive) in a structured error line
+
+**Detection helper**: before classifying a wizard crash as `failed`, grep the latest log file for these patterns:
+
+```bash
+is_rate_limited_log() {
+  local log="$1"
+  grep -qE 'Request rejected \(429\)|"type":[[:space:]]*"rate_limit_error"|rate.limit.*exceeded' "$log" 2>/dev/null
+}
+```
+
+If detected: the wizard did NOT fail — it hit a quota wall. Do the following instead of the normal failed path:
+
+1. Mark the entry `status: throttled`, `retry_after: <ISO-8601>` (compute: `now + 300s`, floor). Do NOT increment `respawn_count`; throttling isn't a crash.
+2. Increment a `throttle_count` field on the entry (initialize to 0).
+3. If `throttle_count >= 3`: give up on graceful handling — this entry keeps getting throttled. Escalate with `rule: persistent-throttle`, `mode: <mode>`, `issue_key: <SOR-N or null>`, and set `status: failed`. (The user probably needs to pause the coordinator or raise their plan.)
+4. Append `{"ts":"...","event":"wizard-throttled","id":"<id>","mode":"<mode>","retry_after":"<ISO-8601>","throttle_count":<N>}` to events.log.
+
+**Global pause**: if this tick detected ≥3 wizard throttles (new `throttled` transitions), set `paused_until: <ISO-8601>` on `sorcerer.json` to `now + 900s` (15 min). The coordinator loop honors this before the next tick. Append event `{"ts":"...","event":"coordinator-paused","paused_until":"<ISO-8601>","reason":"rate-limit-storm"}`.
+
+**Resuming**: steps 11a/b/c treat `status: throttled` identically to `status: stale`, but the trigger is `now >= retry_after` instead of heartbeat age, and respawn_count is NOT consulted or incremented.
+
 ## State files
 
 **`.sorcerer/sorcerer.json`** — the persistent index:
 ```json
 {
+  "paused_until": "<ISO-8601 or null>",
   "active_architects": [
     {
       "id": "<uuid>",
-      "status": "pending-architect | running | awaiting-tier-2 | completed | failed | archived",
+      "status": "pending-architect | running | throttled | awaiting-tier-2 | completed | failed | archived",
       "started_at": "<ISO-8601>",
       "request_file": "<path>",
       "plan_file": "<path or null>",
       "pid": "<int or null>",
-      "respawn_count": 0
+      "respawn_count": 0,
+      "retry_after": "<ISO-8601 or null>",
+      "throttle_count": 0
     }
   ],
   "active_wizards": [
     {
       "id": "<uuid>",
       "mode": "design",
-      "status": "running | awaiting-tier-3 | completed | failed | archived",
+      "status": "running | throttled | awaiting-tier-3 | completed | failed | archived",
       "started_at": "<ISO-8601>",
       "architect_id": "<parent architect uuid>",
       "sub_epic_index": 0,
@@ -65,12 +98,14 @@ If the `PushNotification` tool is unavailable in this tick's environment, skip t
       "epic_linear_id": "<id or null>",
       "manifest_file": "<path or null>",
       "pid": "<int or null>",
-      "respawn_count": 0
+      "respawn_count": 0,
+      "retry_after": "<ISO-8601 or null>",
+      "throttle_count": 0
     },
     {
       "id": "<uuid>",
       "mode": "implement",
-      "status": "running | awaiting-review | merging | merged | failed | blocked | archived",
+      "status": "running | throttled | awaiting-review | merging | merged | failed | blocked | archived",
       "started_at": "<ISO-8601>",
       "designer_id": "<parent designer wizard uuid>",
       "issue_linear_id": "<Linear UUID>",
@@ -83,7 +118,10 @@ If the `PushNotification` tool is unavailable in this tick's environment, skip t
       "review_decision": "merge | escalate | null",
       "pid": "<int or null>",
       "respawn_count": 0,
-      "refer_back_cycle": 0
+      "refer_back_cycle": 0,
+      "conflict_cycle": 0,
+      "retry_after": "<ISO-8601 or null>",
+      "throttle_count": 0
     }
   ]
 }
@@ -222,7 +260,8 @@ Cases:
   - Update entry: `status: awaiting-tier-2`, `plan_file: .sorcerer/architects/<id>/plan.json`.
 - `pl=absent, hb=absent` — possible failure:
   - If `now - started_at < 30s`, too early to judge. Skip.
-  - Otherwise: `status: failed`. Append one JSON line to `.sorcerer/escalations.log`:
+  - Otherwise: **run the rate-limit detection first** (see "Rate-limit (429) handling" above). If the log matches a 429 pattern, follow the throttle path — do NOT mark `failed` or write an escalation.
+  - Only if no 429 was detected: `status: failed`. Append one JSON line to `.sorcerer/escalations.log`:
     ```bash
     jq -nc \
       --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -262,7 +301,8 @@ Cases:
   - Emit `tick: skipped tier-3-spawn — not yet implemented`.
 - `mf=absent, hb=absent`:
   - If `now - started_at < 30s`, too early to judge. Skip.
-  - Otherwise: `status: failed`. Append one JSON line to `.sorcerer/escalations.log`:
+  - Otherwise: **run the rate-limit detection first** (see "Rate-limit (429) handling" above). If the log matches a 429 pattern, follow the throttle path — do NOT mark `failed` or write an escalation.
+  - Only if no 429 was detected: `status: failed`. Append one JSON line to `.sorcerer/escalations.log`:
     ```bash
     jq -nc \
       --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -317,7 +357,8 @@ Cases:
   - Wizard reported its own failure. Update `status: failed`. Append to `.sorcerer/escalations.log` with `rule: <implement|feedback|rebase>-self-reported-failure`, include the wizard's failure reason.
 - `hb=absent` AND `pr=absent` AND no completion marker in log:
   - If `now - started_at < 30s`, too early — skip.
-  - Otherwise: crashed without writing output. `status: failed`. Append to `.sorcerer/escalations.log` with `rule: implement-no-output` (or `feedback-no-output`, `rebase-no-output`).
+  - Otherwise: **run the rate-limit detection first** (see "Rate-limit (429) handling" above). If the latest log matches a 429 pattern, follow the throttle path — do NOT mark `failed` or write an escalation.
+  - Only if no 429 was detected: crashed without writing output. `status: failed`. Append to `.sorcerer/escalations.log` with `rule: implement-no-output` (or `feedback-no-output`, `rebase-no-output`).
 - `pr=present, hb=present` — wizard mid-write; wait for next tick.
 - `hb=present` — wizard still working; step 11c handles staleness.
 
@@ -512,7 +553,18 @@ Append event:
 
 After processing all candidates for a designer, if every issue in its manifest has either a corresponding `running` or `awaiting-review` implement wizard, transition the designer's `status` from `awaiting-tier-3` to `completed`. Otherwise leave at `awaiting-tier-3` for the next tick.
 
-### Step 11 — Heartbeat poll
+### Step 11 — Heartbeat poll and throttle resume
+
+#### 11.0. Throttled resume (run first)
+
+For every entry in `active_architects + active_wizards` with `status: throttled`:
+- If `now < retry_after`: skip (still cooling down).
+- If `now >= retry_after`: respawn the wizard with its original spawn command (same command the initial spawn used; architect → `spawn-wizard.sh architect --request-file ...`, designer → `spawn-wizard.sh design --architect-plan-file ... --sub-epic-index ...`, implement/feedback/rebase → `spawn-wizard.sh <mode> --issue-meta-file <state_dir>/meta.json`). Do NOT increment `respawn_count`. Set `status: running`, clear `retry_after`, update `pid` and `started_at`. Append:
+  ```json
+  {"ts":"...","event":"wizard-resumed","id":"<id>","mode":"<mode>","throttle_count":<N>}
+  ```
+
+Also check the top-level `paused_until`: if set and now >= paused_until, clear it and append `{"ts":"...","event":"coordinator-resumed"}`.
 
 #### 11a. Architects
 

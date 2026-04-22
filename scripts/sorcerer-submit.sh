@@ -69,6 +69,18 @@ case "$ARG" in
     fi
 
     if [[ -f "$STATE_FILE" ]] && jq -e . "$STATE_FILE" >/dev/null 2>&1; then
+      # Coordinator-level pause (rate-limit hold).
+      paused_until=$(jq -r '.paused_until // ""' "$STATE_FILE")
+      if [[ -n "$paused_until" ]]; then
+        now_epoch=$(date +%s)
+        pause_epoch=$(date -d "$paused_until" +%s 2>/dev/null || echo 0)
+        if (( pause_epoch > now_epoch )); then
+          remain=$(( pause_epoch - now_epoch ))
+          echo
+          echo "Coordinator paused (rate-limit hold): $remain s remaining, until $paused_until"
+        fi
+      fi
+
       # Summary counts by status, per actor type.
       echo
       echo "Architects:"
@@ -98,11 +110,12 @@ case "$ARG" in
       echo "In-flight (will be re-evaluated next tick):"
       jq -r '
         def nonterm: (. == "pending-architect" or . == "running"
+                   or . == "throttled"
                    or . == "awaiting-tier-2"   or . == "awaiting-tier-3"
                    or . == "pending-design"    or . == "awaiting-review"
                    or . == "merging");
-        def fmt_a: "  architect \(.id[0:8]) [\(.status)] — \(.request_file // "?")";
-        def fmt_w: "  \(.mode) \(.id[0:8]) [\(.status)] — \(.issue_key // .sub_epic_name // "?")";
+        def fmt_a: "  architect \(.id[0:8]) [\(.status)\(if .retry_after then " until \(.retry_after)" else "" end)] — \(.request_file // "?")";
+        def fmt_w: "  \(.mode) \(.id[0:8]) [\(.status)\(if .retry_after then " until \(.retry_after)" else "" end)] — \(.issue_key // .sub_epic_name // "?")";
         ( [(.active_architects // [])[] | select(.status | nonterm) | fmt_a]
           + [(.active_wizards // [])[]   | select(.status | nonterm) | fmt_w] )
         | (if length == 0 then "  (nothing in-flight)" else join("\n") end)

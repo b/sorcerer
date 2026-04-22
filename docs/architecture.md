@@ -205,7 +205,7 @@ Heartbeats every 60s. Stale >5min → respawn once; second failure → escalate.
 | Failure | Detection | Recovery |
 |---|---|---|
 | Wizard session crash | Stale heartbeat | Respawn once; second failure → escalate |
-| Claude API rate limit | HTTP 429 | Exponential backoff (base 30s, cap 15min) |
+| Claude API rate limit | HTTP 429 in wizard log | Coordinator marks the wizard `throttled` (not `failed`), records `retry_after` (now+5min), respawns automatically on the next tick past that timestamp. After the 3rd throttle for the same entry, escalate with `rule: persistent-throttle`. 3+ throttles in one tick trigger a coordinator-level 15-minute pause via `paused_until` in `sorcerer.json`; `scripts/coordinator-loop.sh` honors it. |
 | GitHub API rate limit | `gh` non-zero | Backoff; >1hr → escalate |
 | `$GITHUB_TOKEN` expired | `gh api /user` 401 | `refresh-token.sh`; failure → escalate |
 | Linear MCP disconnected | MCP error | Retry; persistent → escalate |
