@@ -148,7 +148,7 @@ claude --version && claude -p "echo ready"
     "architect":          "xhigh",
     "designer":           "xhigh",
     "executor":           "high",
-    "reviewer":           "max",
+    "reviewer":           "xhigh",
     "reviewer_architect": "max",
     "reviewer_design":    "max"
   },
@@ -189,7 +189,12 @@ Field notes:
 
   - **Planners** — `coordinator`, `architect`, `designer` → `xhigh`. Planning work is where sorcerer's decisions compound; extra depth per session is the single highest-leverage spend.
   - **Executor** → `high`. Implementation runs by far the most sessions per epic, so it's the biggest cost driver; `high` is enough for pattern-following coding work, and the reviewer catches deeper issues downstream. Bump to `xhigh` if your implementation work is architecturally novel (new service, new protocol) rather than feature-follow.
-  - **Reviewers** (`reviewer`, `reviewer_architect`, `reviewer_design`) → `max`. Reviewing good output is harder than producing it, and a same-effort reviewer rubber-stamps. One level above the producers keeps the gate meaningful.
+  - **Reviewers** are set one level above the role they review, not a flat maximum. A same-effort reviewer rubber-stamps; a one-notch bump keeps the gate meaningful without wasting spend.
+    - `reviewer` reviews executor output (PR diffs) → `xhigh` (executor is `high`).
+    - `reviewer_architect` reviews architect output (`plan.json` + cross-sub-epic contracts) → `max` (architect is `xhigh`).
+    - `reviewer_design` reviews designer output (`manifest.json` + Linear issues) → `max` (designer is `xhigh`).
+
+    If you adjust a producer's effort, bump the matching reviewer by one level yourself — the relationship is enforced by convention, not by code.
 
   Adjust any role downward if you're pinning to a model that doesn't support the higher levels (e.g. Sonnet 4.6 tops out at `high`; set executor's model to `claude-sonnet-4-6` and its effort stays at `high`).
 - JSON has no comments — refer to these notes or `config.json.example` for reference field semantics.
