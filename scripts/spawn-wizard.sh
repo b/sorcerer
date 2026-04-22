@@ -21,8 +21,8 @@
 #   --issue-meta-file <path>         per-issue meta.json (required for implement/feedback);
 #                                    its parent dir is the wizard's state_dir
 #   --state-dir <path>               override the default state_dir computation
-#   --model <name>                   override the default model (claude uses opus by default;
-#                                    only downgrade if you've measured the role tolerates it)
+#   --model <name>                   override config.models.<role> (claude default otherwise)
+#   --effort <level>                 override config.effort.<role>; low | medium | high | xhigh | max
 #   --wizard-id <uuid>               use this UUID instead of generating one (lets
 #                                    the coordinator pre-create state/<parent>/<id>/
 #                                    and track sessions by a known id)
@@ -53,6 +53,7 @@ esac
 
 REQUEST_FILE=""
 MODEL=""
+EFFORT=""
 WIZARD_ID_OVERRIDE=""
 ARCHITECT_PLAN_FILE=""
 SUB_EPIC_INDEX=""
@@ -66,6 +67,9 @@ while [[ $# -gt 0 ]]; do
     --model)
       [[ $# -ge 2 ]] || { echo "ERROR: --model requires a value" >&2; exit 2; }
       MODEL="$2"; shift 2 ;;
+    --effort)
+      [[ $# -ge 2 ]] || { echo "ERROR: --effort requires a value" >&2; exit 2; }
+      EFFORT="$2"; shift 2 ;;
     --wizard-id)
       [[ $# -ge 2 ]] || { echo "ERROR: --wizard-id requires a value" >&2; exit 2; }
       WIZARD_ID_OVERRIDE="$2"; shift 2 ;;
@@ -342,19 +346,44 @@ esac
 
 LOG_FILE="$STATE_DIR/logs/spawn.txt"
 
+# Resolve per-role defaults from config.json when the caller didn't pass
+# --model / --effort explicitly. Role mapping:
+#   architect mode              → config.{models,effort}.architect
+#   design mode                 → config.{models,effort}.designer
+#   implement / feedback / rebase → config.{models,effort}.executor
+#   noop                        → no role; claude defaults
+case "$MODE" in
+  architect)                  ROLE_KEY="architect" ;;
+  design)                     ROLE_KEY="designer"  ;;
+  implement|feedback|rebase)  ROLE_KEY="executor"  ;;
+  *)                          ROLE_KEY=""          ;;
+esac
+
+if [[ -n "$ROLE_KEY" && -f "$CONFIG" ]]; then
+  if [[ -z "$MODEL" ]]; then
+    MODEL=$(jq -r --arg k "$ROLE_KEY" '.models[$k] // ""' "$CONFIG" 2>/dev/null || echo "")
+  fi
+  if [[ -z "$EFFORT" ]]; then
+    EFFORT=$(jq -r --arg k "$ROLE_KEY" '.effort[$k] // ""' "$CONFIG" 2>/dev/null || echo "")
+  fi
+fi
+
 echo "spawning wizard:"
 echo "  id:       $WIZARD_ID"
 echo "  mode:     $MODE"
 echo "  state:    $STATE_DIR"
 echo "  context:  $CONTEXT_FILE"
 echo "  log:      $LOG_FILE"
+[[ -n "$MODEL"  ]] && echo "  model:    $MODEL"
+[[ -n "$EFFORT" ]] && echo "  effort:   $EFFORT"
 
 PROMPT="$(cat "$PROMPT_FILE")"
 
 cd "$STATE_DIR"
 
 EXTRA_ARGS=()
-[[ -n "$MODEL" ]] && EXTRA_ARGS+=(--model "$MODEL")
+[[ -n "$MODEL" ]]  && EXTRA_ARGS+=(--model  "$MODEL")
+[[ -n "$EFFORT" ]] && EXTRA_ARGS+=(--effort "$EFFORT")
 
 set +e
 SORCERER_CONTEXT_FILE="$CONTEXT_FILE" \

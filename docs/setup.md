@@ -135,11 +135,22 @@ claude --version && claude -p "echo ready"
     "wizard_label":     "wizard"
   },
   "models": {
-    "coordinator": "claude-opus-4-7",
-    "architect":   "claude-opus-4-7",
-    "designer":    "claude-opus-4-7",
-    "executor":    "claude-opus-4-7",
-    "reviewer":    "claude-opus-4-7"
+    "coordinator":        "claude-opus-4-7",
+    "architect":          "claude-opus-4-7",
+    "designer":           "claude-opus-4-7",
+    "executor":           "claude-opus-4-7",
+    "reviewer":           "claude-opus-4-7",
+    "reviewer_architect": "claude-opus-4-7",
+    "reviewer_design":    "claude-opus-4-7"
+  },
+  "effort": {
+    "coordinator":        "xhigh",
+    "architect":          "xhigh",
+    "designer":           "xhigh",
+    "executor":           "high",
+    "reviewer":           "max",
+    "reviewer_architect": "max",
+    "reviewer_design":    "max"
   },
   "architect": {
     "auto_threshold": {
@@ -163,6 +174,18 @@ Field notes:
 - `explorable_repos` — readable during design; must be a superset of `repos`.
 - `architect.auto_threshold` — auto-invoke Tier 1 when the request is expected to touch `min_repos`+ repos or produce `min_issues_estimate`+ issues.
 - `merge.strategy` — one of `squash | merge | rebase`.
+- `effort.<role>` — passed to `claude -p --effort <level>`. Valid values: `low | medium | high | xhigh | max`. `xhigh` only works on Opus 4.7+; older models accept up to `high`. Roles map to wizard modes:
+  - `coordinator` — the tick loop itself
+  - `architect` — Tier-1 architect sessions
+  - `designer` — Tier-2 design sessions
+  - `executor` — Tier-3 implement / feedback / rebase sessions (all share this setting)
+  - `reviewer` — PR-set review; runs inline in the coordinator tick today (so effectively uses `coordinator` effort at runtime), but the field is honored once review moves to its own spawn
+  - `reviewer_architect` — reserved for a future architect-output reviewer (validates `plan.json` + cross-sub-epic contracts before Tier-2 fan-out)
+  - `reviewer_design` — reserved for a future design-output reviewer (validates the Linear epic + `manifest.json` before Tier-3 dispatch)
+
+  Omit a role (or set it to `""`) to defer to the claude CLI's own default — useful on older CLIs that lack `--effort`. The `reviewer_*` roles are schema stubs today: they are wired through config so projects can pre-set the level they want when those reviewers come online, without a later schema migration.
+
+  **Default rationale.** Planning roles (coordinator / architect / designer) default to `xhigh`. Executor defaults to `high` — implementation work runs many sessions per epic and is the biggest cost driver, and `high` is still the Opus 4.6 / Sonnet 4.6 ceiling anyway. Reviewers (`reviewer` / `reviewer_architect` / `reviewer_design`) default to `max` — reviewing good output is harder than producing it, and a same-effort reviewer can rubber-stamp. Bump executor back up to `xhigh` if you're running on Opus 4.7 and want the extra depth.
 - JSON has no comments — refer to these notes or `config.json.example` for reference field semantics.
 
 ## Verification

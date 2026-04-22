@@ -72,6 +72,14 @@ else
   no "/wizard skill missing — run 'bash $SORCERER_REPO/scripts/install-skill.sh' (auto-installs from vlad-ko/claude-wizard) or 'curl -sL https://raw.githubusercontent.com/vlad-ko/claude-wizard/main/install.sh | bash'"
 fi
 
+# === claude CLI capability ===
+section "claude CLI capability"
+if claude --help 2>&1 | grep -qE -- '--effort[[:space:]]'; then
+  ok "claude CLI supports --effort flag"
+else
+  no "claude CLI too old — no --effort flag. Upgrade to a version that supports 'low|medium|high|xhigh|max' effort levels, or remove .sorcerer/config.json:effort."
+fi
+
 # === Linear MCP ===
 section "Linear MCP"
 if claude mcp list 2>/dev/null | grep -qE 'linear.*✓ Connected'; then

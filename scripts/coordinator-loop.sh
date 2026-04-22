@@ -82,16 +82,18 @@ while true; do
   fi
 
   echo "[$(ts)] running tick"
-  # No --model: use whatever claude's default is (currently opus). The tick
-  # does real judgment work — state-machine routing, PR-set review, failure
-  # classification — so we want the stronger model by default. If an operator
-  # wants to downgrade for cost, they can edit .sorcerer/config.json and we'll
-  # honor it in a future slice that reads models.coordinator at tick time.
-  if ! claude -p \
-      --output-format text \
-      --permission-mode bypassPermissions \
-      "$TICK_PROMPT" \
-      < /dev/null; then
+  # Apply config.json:models.coordinator / effort.coordinator if set. Both
+  # default to claude's own defaults when absent, so an unconfigured project
+  # keeps working; an operator who wants a specific model or downgraded
+  # effort edits .sorcerer/config.json.
+  TICK_ARGS=(--output-format text --permission-mode bypassPermissions)
+  if [[ -f .sorcerer/config.json ]]; then
+    tick_model=$(jq -r '.models.coordinator // ""' .sorcerer/config.json 2>/dev/null || echo "")
+    tick_effort=$(jq -r '.effort.coordinator // ""' .sorcerer/config.json 2>/dev/null || echo "")
+    [[ -n "$tick_model"  ]] && TICK_ARGS+=(--model  "$tick_model")
+    [[ -n "$tick_effort" ]] && TICK_ARGS+=(--effort "$tick_effort")
+  fi
+  if ! claude -p "${TICK_ARGS[@]}" "$TICK_PROMPT" < /dev/null; then
     echo "[$(ts)] tick exited non-zero"
   fi
 
