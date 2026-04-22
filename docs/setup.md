@@ -185,7 +185,13 @@ Field notes:
 
   Omit a role (or set it to `""`) to defer to the claude CLI's own default — useful on older CLIs that lack `--effort`. The `reviewer_*` roles are schema stubs today: they are wired through config so projects can pre-set the level they want when those reviewers come online, without a later schema migration.
 
-  **Default rationale.** Planning roles (coordinator / architect / designer) default to `xhigh`. Executor defaults to `high` — implementation work runs many sessions per epic and is the biggest cost driver, and `high` is still the Opus 4.6 / Sonnet 4.6 ceiling anyway. Reviewers (`reviewer` / `reviewer_architect` / `reviewer_design`) default to `max` — reviewing good output is harder than producing it, and a same-effort reviewer can rubber-stamp. Bump executor back up to `xhigh` if you're running on Opus 4.7 and want the extra depth.
+  **Default rationale.** Every role defaults to `claude-opus-4-7` for the model. Effort is tuned against Opus 4.7's full range (`low | medium | high | xhigh | max`):
+
+  - **Planners** — `coordinator`, `architect`, `designer` → `xhigh`. Planning work is where sorcerer's decisions compound; extra depth per session is the single highest-leverage spend.
+  - **Executor** → `high`. Implementation runs by far the most sessions per epic, so it's the biggest cost driver; `high` is enough for pattern-following coding work, and the reviewer catches deeper issues downstream. Bump to `xhigh` if your implementation work is architecturally novel (new service, new protocol) rather than feature-follow.
+  - **Reviewers** (`reviewer`, `reviewer_architect`, `reviewer_design`) → `max`. Reviewing good output is harder than producing it, and a same-effort reviewer rubber-stamps. One level above the producers keeps the gate meaningful.
+
+  Adjust any role downward if you're pinning to a model that doesn't support the higher levels (e.g. Sonnet 4.6 tops out at `high`; set executor's model to `claude-sonnet-4-6` and its effort stays at `high`).
 - JSON has no comments — refer to these notes or `config.json.example` for reference field semantics.
 
 ## Verification
