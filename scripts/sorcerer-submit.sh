@@ -311,11 +311,22 @@ EOF
         wizard_label:     "wizard"
       },
       models: {
-        coordinator: "claude-opus-4-7",
-        architect:   "claude-opus-4-7",
-        designer:    "claude-opus-4-7",
-        executor:    "claude-opus-4-7",
-        reviewer:    "claude-opus-4-7"
+        coordinator:        "claude-opus-4-7",
+        architect:          "claude-opus-4-7",
+        designer:           "claude-opus-4-7",
+        executor:           "claude-opus-4-7",
+        reviewer:           "claude-opus-4-7",
+        reviewer_architect: "claude-opus-4-7",
+        reviewer_design:    "claude-opus-4-7"
+      },
+      effort: {
+        coordinator:        "xhigh",
+        architect:          "xhigh",
+        designer:           "xhigh",
+        executor:           "high",
+        reviewer:           "max",
+        reviewer_architect: "max",
+        reviewer_design:    "max"
       },
       architect: {
         auto_threshold: {
