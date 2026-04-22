@@ -20,12 +20,13 @@ That one Bash call is the entire skill. Pre-approved in `~/.claude/settings.json
 
 The submit script dispatches on the first word:
 - `stop` → stop the coordinator for the current project
-- `status` → print sorcerer.json + coordinator pid state
+- `status` → print a pending/in-flight summary plus the raw sorcerer.json
 - `attach` → stream live event updates from a running coordinator
 - `log` → print the full formatted event history for this project
+- `--force <prompt>` → submit even if an identical prompt is already in-flight (dedup bypass)
 - anything else → submit as a new request and auto-attach to the live event stream
 
-All five forms are just `bash sorcerer-submit.sh "<whatever user typed>"` from the skill's perspective.
+All forms are just `bash sorcerer-submit.sh "<whatever user typed>"` from the skill's perspective.
 
 If the user's message is literally empty after `/sorcerer`, the submit script prints a usage block on stderr and exits 2 — just print that verbatim.
 

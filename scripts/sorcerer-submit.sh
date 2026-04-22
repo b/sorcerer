@@ -48,24 +48,84 @@ case "$ARG" in
     exec bash "$SORCERER_REPO/scripts/stop-coordinator.sh" "$PROJECT_ROOT"
     ;;
   status)
-    STATE_FILE="$PROJECT_ROOT/.sorcerer/sorcerer.json"
-    if [[ ! -f "$STATE_FILE" ]]; then
-      echo "No sorcerer state at $STATE_FILE — nothing has run here yet."
-      exit 0
-    fi
+    STATE_DIR="$PROJECT_ROOT/.sorcerer"
+    STATE_FILE="$STATE_DIR/sorcerer.json"
     echo "=== sorcerer status for $PROJECT_ROOT ==="
-    jq . "$STATE_FILE" 2>/dev/null || cat "$STATE_FILE"
+
+    # Pending requests (files in requests/ that the coordinator hasn't picked
+    # up yet). Surfacing these prominently is critical — they're the most
+    # commonly-missed "already running" signal.
+    pending_count=0
+    if [[ -d "$STATE_DIR/requests" ]]; then
+      pending_count=$(find "$STATE_DIR/requests" -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l)
+    fi
+    echo
+    echo "Pending requests (not yet picked up): $pending_count"
+    if (( pending_count > 0 )); then
+      while IFS= read -r f; do
+        first_line=$(head -1 "$f" 2>/dev/null | head -c 100)
+        printf "  - %s: %s\n" "$(basename "$f")" "$first_line"
+      done < <(find "$STATE_DIR/requests" -maxdepth 1 -name '*.md' -type f 2>/dev/null | sort)
+    fi
+
+    if [[ -f "$STATE_FILE" ]] && jq -e . "$STATE_FILE" >/dev/null 2>&1; then
+      # Summary counts by status, per actor type.
+      echo
+      echo "Architects:"
+      jq -r '
+        (.active_architects // [])
+        | group_by(.status)
+        | map({status: .[0].status, count: length})
+        | (if length == 0 then "  (none)"
+           else (map("  \(.count) \(.status)") | join("\n"))
+           end)
+      ' "$STATE_FILE"
+
+      echo
+      echo "Wizards:"
+      jq -r '
+        (.active_wizards // [])
+        | group_by([.mode, .status])
+        | map({mode: .[0].mode, status: .[0].status, count: length})
+        | (if length == 0 then "  (none)"
+           else (map("  \(.count) \(.mode)/\(.status)") | join("\n"))
+           end)
+      ' "$STATE_FILE"
+
+      # Highlight anything in a non-terminal "still working" state so the user
+      # can spot in-flight items at a glance.
+      echo
+      echo "In-flight (will be re-evaluated next tick):"
+      jq -r '
+        def nonterm: (. == "pending-architect" or . == "running"
+                   or . == "awaiting-tier-2"   or . == "awaiting-tier-3"
+                   or . == "pending-design"    or . == "awaiting-review"
+                   or . == "merging");
+        def fmt_a: "  architect \(.id[0:8]) [\(.status)] — \(.request_file // "?")";
+        def fmt_w: "  \(.mode) \(.id[0:8]) [\(.status)] — \(.issue_key // .sub_epic_name // "?")";
+        ( [(.active_architects // [])[] | select(.status | nonterm) | fmt_a]
+          + [(.active_wizards // [])[]   | select(.status | nonterm) | fmt_w] )
+        | (if length == 0 then "  (nothing in-flight)" else join("\n") end)
+      ' "$STATE_FILE"
+
+      # Raw dump last, for anyone who wants the details.
+      echo
+      echo "--- sorcerer.json (full) ---"
+      jq . "$STATE_FILE"
+    else
+      echo
+      echo "No coordinator state file at $STATE_FILE."
+    fi
+
+    echo
     if [[ -f "$PROJECT_ROOT/.sorcerer/coordinator.pid" ]]; then
       pid=$(cat "$PROJECT_ROOT/.sorcerer/coordinator.pid")
       if kill -0 "$pid" 2>/dev/null; then
-        echo
         echo "Coordinator running (pid $pid)"
       else
-        echo
         echo "Coordinator NOT running (stale pid $pid)"
       fi
     else
-      echo
       echo "Coordinator NOT running"
     fi
     exit 0
@@ -86,8 +146,9 @@ case "$ARG" in
     cat >&2 <<'EOF'
 Usage:
   /sorcerer <description of the system to build or refactor>   — submit a request + attach
+  /sorcerer --force <same prompt>                              — bypass the duplicate-request guard
   /sorcerer stop                                                — stop the coordinator
-  /sorcerer status                                              — show current state
+  /sorcerer status                                              — show current state (pending/in-flight + summary)
   /sorcerer attach                                              — reattach to a running coordinator
   /sorcerer log                                                 — print full formatted event history
 
@@ -101,8 +162,108 @@ esac
 
 # --- Submit flow ----------------------------------------------------------
 PROMPT="$ARG"
+
+# Allow `/sorcerer --force <prompt>` to bypass the duplicate-detection guard
+# below. Useful when an earlier attempt genuinely failed and the user wants
+# a fresh run against the same wording.
+FORCE=0
+if [[ "$PROMPT" == --force* ]]; then
+  FORCE=1
+  PROMPT="${PROMPT#--force}"
+  PROMPT="${PROMPT#[[:space:]]}"  # strip one leading space
+fi
+
+if [[ -z "$PROMPT" ]]; then
+  echo "ERROR: empty prompt after --force flag parsing." >&2
+  exit 2
+fi
+
 STATE="$PROJECT_ROOT/.sorcerer"
 mkdir -p "$STATE/requests"
+
+# --- Duplicate-submission guard -------------------------------------------
+# Compute a content hash of the incoming prompt and refuse if any in-flight
+# architect, wizard, or pending request file has the same hash. This is the
+# common footgun: a user runs /sorcerer, the architect picks up the request,
+# moves it out of requests/ into architects/<id>/request.md, and the user
+# — not seeing a pending request in `status` — submits again.
+#
+# Skipped when --force is passed (user explicitly asking to resubmit).
+if [[ "$FORCE" == "0" ]]; then
+  # Normalize: strip trailing whitespace, collapse trailing newlines.
+  INCOMING_HASH=$(printf '%s' "$PROMPT" | sha256sum | awk '{print $1}')
+
+  # Gather candidate request files and their hashes.
+  declare -A EXISTING_HASH
+  while IFS= read -r f; do
+    [[ -f "$f" ]] || continue
+    h=$(sha256sum < "$f" | awk '{print $1}')
+    # sha256sum of file content includes trailing newline that Write adds;
+    # re-hash the content without the trailing newline to match the incoming
+    # prompt (which sorcerer-submit writes via printf '%s\n').
+    content=$(cat "$f")
+    h_stripped=$(printf '%s' "$content" | sha256sum | awk '{print $1}')
+    EXISTING_HASH["$f"]="$h_stripped"
+  done < <(
+    find "$STATE/requests" -maxdepth 1 -name '*.md' -type f 2>/dev/null
+    find "$STATE/architects" -maxdepth 2 -name 'request.md' -type f 2>/dev/null
+    find "$STATE/wizards" -maxdepth 2 -name 'request.md' -type f 2>/dev/null
+  )
+
+  duplicates=()
+  for f in "${!EXISTING_HASH[@]}"; do
+    if [[ "${EXISTING_HASH[$f]}" == "$INCOMING_HASH" ]]; then
+      # For files under architects/ or wizards/, only count as a collision
+      # if the associated state entry is still in a non-terminal status.
+      still_active=1
+      case "$f" in
+        */architects/*/request.md)
+          id=$(basename "$(dirname "$f")")
+          if [[ -f "$STATE/sorcerer.json" ]]; then
+            status=$(jq -r --arg id "$id" '(.active_architects // [])[] | select(.id == $id) | .status' "$STATE/sorcerer.json" 2>/dev/null || echo "")
+            case "$status" in
+              completed|failed|archived|"") still_active=0 ;;
+            esac
+          fi
+          ;;
+        */wizards/*/request.md)
+          id=$(basename "$(dirname "$f")")
+          if [[ -f "$STATE/sorcerer.json" ]]; then
+            status=$(jq -r --arg id "$id" '(.active_wizards // [])[] | select(.id == $id) | .status' "$STATE/sorcerer.json" 2>/dev/null || echo "")
+            case "$status" in
+              completed|merged|failed|archived|blocked|"") still_active=0 ;;
+            esac
+          fi
+          ;;
+      esac
+      if (( still_active )); then
+        duplicates+=("$f")
+      fi
+    fi
+  done
+
+  if (( ${#duplicates[@]} > 0 )); then
+    cat >&2 <<EOF
+ERROR: a duplicate request is already in-flight for this project.
+
+Content hash of your prompt matches these existing request(s):
+EOF
+    for d in "${duplicates[@]}"; do echo "  - $d" >&2; done
+    cat >&2 <<EOF
+
+To see what's running:  /sorcerer status
+To follow progress:     /sorcerer attach
+
+If you intend to submit this prompt a second time anyway (e.g. because the
+earlier run is stuck or you want a parallel attempt), prepend --force:
+  /sorcerer --force <your prompt>
+
+If the earlier run failed and its entry shouldn't be in-flight anymore,
+fix the underlying issue first; re-submitting won't unstick it.
+EOF
+    exit 1
+  fi
+fi
 
 # Bootstrap config.json if missing. Derive repo from git remote.
 if [[ ! -f "$STATE/config.json" ]]; then
