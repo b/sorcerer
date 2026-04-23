@@ -82,15 +82,14 @@ while true; do
   fi
 
   echo "[$(ts)] running tick"
-  # Apply config.json:models.coordinator / effort.coordinator if set. Both
-  # default to claude's own defaults when absent, so an unconfigured project
-  # keeps working; an operator who wants a specific model or downgraded
-  # effort edits .sorcerer/config.json.
   TICK_ARGS=(--output-format text --permission-mode bypassPermissions)
+  TICK_LOG=".sorcerer/last-tick.log"
 
   # Pick the active provider (primary → fallback) and apply its env vars.
   # When config.providers is absent/empty, this is a no-op and the tick
   # runs against whatever ambient auth the caller has.
+  tick_rc=0
+  tick_provider=""
   (
     # Subshell so exported vars don't leak across loop iterations when the
     # active provider rotates. The claude -p inside inherits them.
@@ -99,7 +98,6 @@ while true; do
       ".sorcerer/config.json" ".sorcerer/sorcerer.json"
     if [[ -n "$SORCERER_ACTIVE_PROVIDER" ]]; then
       echo "[$(ts)] tick provider: $SORCERER_ACTIVE_PROVIDER"
-      # Per-provider model override wins over top-level models.coordinator.
       tick_model=$(echo "$SORCERER_PROVIDER_MODELS" | jq -r '.coordinator // ""' 2>/dev/null || echo "")
     else
       tick_model=""
@@ -111,11 +109,81 @@ while true; do
       [[ -n "$tick_model"  ]] && TICK_ARGS+=(--model  "$tick_model")
       [[ -n "$tick_effort" ]] && TICK_ARGS+=(--effort "$tick_effort")
     fi
-    export SORCERER_ACTIVE_PROVIDER   # spawned wizards default to this
-    if ! claude -p "${TICK_ARGS[@]}" "$TICK_PROMPT" < /dev/null; then
-      echo "[$(ts)] tick exited non-zero"
+    export SORCERER_ACTIVE_PROVIDER
+    # Capture stdout+stderr to TICK_LOG AND to this loop's own stdout via tee,
+    # so coordinator.log keeps showing tick output but we can also grep the log
+    # for 429 markers after exit.
+    if claude -p "${TICK_ARGS[@]}" "$TICK_PROMPT" < /dev/null 2>&1 | tee "$TICK_LOG"; then
+      : # tick succeeded
+    else
+      # PIPESTATUS[0] is the claude -p exit code (tee can't fail in practice).
+      exit "${PIPESTATUS[0]:-1}"
     fi
   )
+  tick_rc=$?
+
+  # If the tick itself hit a rate limit, the in-tick throttle-detection logic
+  # never ran (the tick died before it could write state). Do it here in the
+  # loop so the NEXT iteration picks a different provider.
+  if (( tick_rc != 0 )) && [[ -f "$TICK_LOG" ]] \
+     && grep -qE 'Request rejected \(429\)|"type":[[:space:]]*"rate_limit_error"|rate.limit.*exceeded' "$TICK_LOG"; then
+    # Re-run the helper in a throwaway subshell just to identify which provider
+    # was active for this tick. The helper is idempotent and doesn't write state.
+    tick_provider=$(
+      # shellcheck source=/dev/null
+      source "$SORCERER_REPO/scripts/apply-provider-env.sh" \
+        ".sorcerer/config.json" ".sorcerer/sorcerer.json" >/dev/null 2>&1
+      printf '%s' "${SORCERER_ACTIVE_PROVIDER:-}"
+    )
+    if [[ -n "$tick_provider" ]]; then
+      now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      throttled_until=$(date -u -d "+300 seconds" +%Y-%m-%dT%H:%M:%SZ)
+      # Write throttle state. If sorcerer.json doesn't exist yet, seed it.
+      mkdir -p .sorcerer
+      [[ -f .sorcerer/sorcerer.json ]] || echo '{}' > .sorcerer/sorcerer.json
+      jq --arg p "$tick_provider" --arg tu "$throttled_until" --arg ts "$now_iso" '
+        .providers_state //= {}
+        | .providers_state[$p] //= {throttle_count: 0}
+        | .providers_state[$p].throttled_until    = $tu
+        | .providers_state[$p].last_throttled_at  = $ts
+        | .providers_state[$p].throttle_count     = ((.providers_state[$p].throttle_count // 0) + 1)
+      ' .sorcerer/sorcerer.json > .sorcerer/sorcerer.json.tmp \
+        && mv .sorcerer/sorcerer.json.tmp .sorcerer/sorcerer.json
+      printf '{"ts":"%s","event":"provider-throttled","provider":"%s","throttled_until":"%s","source":"coordinator-tick"}\n' \
+        "$now_iso" "$tick_provider" "$throttled_until" >> .sorcerer/events.log
+      echo "[$(ts)] tick hit 429 on provider $tick_provider; marked throttled until $throttled_until; next iteration picks fallback"
+
+      # If EVERY provider is now throttled, set global paused_until so the loop
+      # sleeps until the earliest slot reopens. Matches the tick's own logic
+      # for wizard-level rate-limit storms.
+      total_providers=$(jq -r '(.providers // []) | length' .sorcerer/config.json 2>/dev/null || echo 0)
+      throttled_count=$(jq -r --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        [(.providers // [])[].name as $n
+         | ((.providers_state // {})[$n].throttled_until // "")
+         | select(. != "" and . > $now)]
+        | length
+      ' <(jq -s '.[0] * .[1]' .sorcerer/config.json .sorcerer/sorcerer.json) 2>/dev/null || echo 0)
+      if (( total_providers > 0 )) && (( throttled_count >= total_providers )); then
+        earliest=$(jq -r --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+          [(.providers_state // {}) | to_entries[]
+           | .value.throttled_until // empty
+           | select(. > $now)]
+          | sort | .[0] // ""
+        ' .sorcerer/sorcerer.json 2>/dev/null || echo "")
+        if [[ -n "$earliest" ]]; then
+          jq --arg pu "$earliest" '.paused_until = $pu' .sorcerer/sorcerer.json \
+            > .sorcerer/sorcerer.json.tmp && mv .sorcerer/sorcerer.json.tmp .sorcerer/sorcerer.json
+          printf '{"ts":"%s","event":"coordinator-paused","paused_until":"%s","reason":"all-providers-throttled"}\n' \
+            "$now_iso" "$earliest" >> .sorcerer/events.log
+          echo "[$(ts)] all providers throttled; paused until $earliest"
+        fi
+      fi
+    else
+      echo "[$(ts)] tick hit 429 but no providers configured; coordinator cannot auto-route around it"
+    fi
+  elif (( tick_rc != 0 )); then
+    echo "[$(ts)] tick exited non-zero ($tick_rc)"
+  fi
 
   # Pacing: 30s while anything is actively running, 60s otherwise.
   if [[ -f .sorcerer/sorcerer.json ]] && jq -e '
