@@ -42,13 +42,17 @@ has_in_flight_work() {
   if [[ -f .sorcerer/sorcerer.json ]] && jq -e '
       def entries: (.active_architects // []) + (.active_wizards // []);
       [entries[].status] | any(
-        . == "pending-architect" or
-        . == "running"           or
-        . == "throttled"         or
-        . == "awaiting-tier-2"   or
-        . == "awaiting-tier-3"   or
-        . == "pending-design"    or
-        . == "awaiting-review"   or
+        . == "pending-architect"           or
+        . == "running"                     or
+        . == "throttled"                   or
+        . == "awaiting-architect-review"   or
+        . == "architect-review-running"    or
+        . == "awaiting-tier-2"             or
+        . == "awaiting-design-review"      or
+        . == "design-review-running"       or
+        . == "awaiting-tier-3"             or
+        . == "pending-design"              or
+        . == "awaiting-review"             or
         . == "merging"
       )' .sorcerer/sorcerer.json > /dev/null 2>&1; then
     return 0
