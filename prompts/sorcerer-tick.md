@@ -140,17 +140,27 @@ is_rate_limited_log() {
 **Extract reset timestamp when available.** The Max-subscription variant prints a concrete reset time; parsing it gives a much better `throttled_until` than the 5-minute default:
 
 ```bash
+# Extract the reset timestamp from a "resets <when> (<tz>)" line in a wizard log.
+# Handles BOTH shapes Claude Code prints:
+#   "resets Apr 24, 1am (UTC)"   — absolute form when reset >24h away
+#   "resets 1am (UTC)"           — relative form when reset ≤24h away
+# and optional ":30"-style minutes. When the relative form's hour has already
+# passed today, rolls forward one day to get "tomorrow at X".
+# Prints the ISO-8601 throttled_until to stdout on success; exits 1 otherwise.
 extract_reset_iso() {
   local log="$1"
-  local line clean parsed
-  line=$(grep -oE "resets [A-Za-z]+ [0-9]+, [0-9]+(:[0-9]+)?\s*(am|pm|AM|PM)?\s*\(?[A-Za-z]+\)?" "$log" 2>/dev/null | head -1)
+  local line clean parsed parsed_epoch now_epoch
+  line=$(grep -oE "resets ([A-Za-z]+ [0-9]+, )?[0-9]+(:[0-9]+)?\s*(am|pm|AM|PM)\s*\(?[A-Za-z]+\)?" "$log" 2>/dev/null | head -1)
   [[ -z "$line" ]] && return 1
   clean=$(echo "$line" | sed -E 's/^resets //; s/\s*\(([^)]+)\)\s*$/ \1/; s/,//')
   parsed=$(date -u -d "$clean" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || return 1
-  # Guard against past times (stale logs, bad parse).
-  local parsed_epoch now_epoch
   parsed_epoch=$(date -u -d "$parsed" +%s 2>/dev/null || echo 0)
   now_epoch=$(date +%s)
+  # Relative form that already passed today → bump to tomorrow.
+  if (( parsed_epoch <= now_epoch )); then
+    parsed=$(date -u -d "$parsed +1 day" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || return 1
+    parsed_epoch=$(date -u -d "$parsed" +%s 2>/dev/null || echo 0)
+  fi
   (( parsed_epoch > now_epoch )) || return 1
   printf '%s\n' "$parsed"
 }

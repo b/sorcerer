@@ -147,19 +147,28 @@ while true; do
     if [[ -n "$tick_provider" ]]; then
       now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-      # Prefer the exact reset timestamp when claude prints one ("resets Apr
-      # 24, 1am (UTC)"). Much better than the 5-minute default — a Max bucket
-      # that's said "resets at X" will 429 again every retry until X.
-      # Falls back to now+300s when no reset string is present.
+      # Prefer the exact reset timestamp when claude prints one. The Max
+      # variant prints two shapes in the wild:
+      #   "resets Apr 24, 1am (UTC)" — absolute when reset is >24h away
+      #   "resets 1am (UTC)"         — relative when reset is within 24h
+      #                                 (means "next occurrence of 1am UTC")
+      # The regex below handles both plus optional ":30"-style minutes.
+      # When the parsed time is in the past (relative form whose hour has
+      # already passed today), roll forward one day to get "tomorrow at X".
+      # Falls back to now+300s only when no reset string matches at all.
       throttled_until=""
-      reset_line=$(grep -oE "resets [A-Za-z]+ [0-9]+, [0-9]+(:[0-9]+)?\s*(am|pm|AM|PM)?\s*\(?[A-Za-z]+\)?" "$TICK_LOG" 2>/dev/null | head -1 || true)
+      reset_line=$(grep -oE "resets ([A-Za-z]+ [0-9]+, )?[0-9]+(:[0-9]+)?\s*(am|pm|AM|PM)\s*\(?[A-Za-z]+\)?" "$TICK_LOG" 2>/dev/null | head -1 || true)
       if [[ -n "$reset_line" ]]; then
         reset_clean=$(echo "$reset_line" | sed -E 's/^resets //; s/\s*\(([^)]+)\)\s*$/ \1/; s/,//')
         parsed=$(date -u -d "$reset_clean" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
-        # Guard against the parsed time being in the past (stale log, bad parse)
         if [[ -n "$parsed" ]]; then
           parsed_epoch=$(date -u -d "$parsed" +%s 2>/dev/null || echo 0)
           now_epoch=$(date +%s)
+          # Relative form that already passed today → bump to tomorrow.
+          if (( parsed_epoch <= now_epoch )); then
+            parsed=$(date -u -d "$parsed +1 day" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+            parsed_epoch=$(date -u -d "$parsed" +%s 2>/dev/null || echo 0)
+          fi
           if (( parsed_epoch > now_epoch )); then
             throttled_until="$parsed"
             echo "[$(ts)] parsed reset time from log: $throttled_until"
