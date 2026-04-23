@@ -19,5 +19,6 @@ config.yaml
 .idea/
 .vscode/
 
-# Claude Code per-project local-only settings
+# Claude Code per-project local-only settings + runtime artifacts
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
