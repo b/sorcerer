@@ -53,6 +53,8 @@ jq -r '
       "Throttled (\(.mode) \(short(.id))): retry after \(.retry_after)"
     elif $e == "wizard-overloaded" then
       "Overloaded 529 (\(.mode) \(short(.id))): retry after \(.retry_after)\(if .overload_count then " (strike #\(.overload_count))" else "" end)"
+    elif $e == "wizard-killed-max-age" then
+      "KILLED (max-age) \(.mode) \(short(.id)) — ran \(.age_seconds)s, over the cap for this mode; escalated"
     elif $e == "wizard-resumed" then
       "Resumed (\(.mode) \(short(.id))) after throttle #\(.throttle_count)"
     elif $e == "provider-throttled" then

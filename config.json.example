@@ -43,7 +43,16 @@
 
   "limits": {
     "max_concurrent_wizards": 3,
-    "max_refer_back_cycles": 5
+    "max_refer_back_cycles": 5,
+    "max_wizard_age_seconds": {
+      "architect":          1800,
+      "architect-review":    900,
+      "design":             2700,
+      "design-review":      1200,
+      "implement":         10800,
+      "feedback":           3600,
+      "rebase":             1800
+    }
   },
 
   "merge": {
