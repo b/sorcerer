@@ -39,6 +39,69 @@ The user is not watching the terminal between ticks — events.log is attached o
 
 If the `PushNotification` tool is unavailable in this tick's environment, skip the call silently. Never let a notification failure change the tick's outcome.
 
+## Max wall-clock age (runaway-wizard kill switch)
+
+A wizard's `claude -p` subprocess can get stuck in a long-running shell construct that never terminates — the most common case observed in the wild is an LLM improvising a `bash until [[ <condition> ]]; do sleep; done` loop where `<condition>` can't become true. Heartbeat may still be touched (if the loop touches it) and PID is alive, so none of step 5's classifiers or step 11's stale-heartbeat check fires. The wizard just burns forever, blocking its own dispatch slot and gating downstream work.
+
+Coordinator enforces a hard wall-clock ceiling per mode via `config.json:limits.max_wizard_age_seconds`. Defaults (seconds):
+
+| mode              | default | rationale                               |
+|-------------------|---------|-----------------------------------------|
+| architect         | 1800    | 30 min; plans don't need longer         |
+| architect-review  |  900    | 15 min; reviewing plan.json is small    |
+| design            | 2700    | 45 min; Linear writes + repo survey     |
+| design-review     | 1200    | 20 min; walking issues, small edits     |
+| implement         | 10800   | 3 hours; real cross-repo work           |
+| feedback          | 3600    | 1 hour; targeted fixes                  |
+| rebase            | 1800    | 30 min; conflict resolution             |
+
+**Kill helper** (used below in step 11):
+
+```bash
+# Given a pid, SIGTERM it, wait up to 5 s, SIGKILL if still alive.
+kill_wizard_pid() {
+  local pid="$1"
+  [[ -n "$pid" && "$pid" != "null" ]] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  for _ in 1 2 3 4 5; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 1
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+}
+```
+
+**Runtime check** (applied in every step 11 sub-section BEFORE the heartbeat-stale check):
+
+```bash
+# For a wizard entry with known mode + started_at + pid:
+max_age=$(jq -r --arg m "<mode>" '.limits.max_wizard_age_seconds[$m] // 3600' .sorcerer/config.json 2>/dev/null || echo 3600)
+age=$(( $(date +%s) - $(date -u -d "<started_at>" +%s) ))
+if (( age > max_age )); then
+  kill_wizard_pid "<pid>"
+  # Don't respawn. A wizard that blew its wall-clock ceiling is stuck, not
+  # recoverable by simple retry. Mark failed + escalate.
+  # Status: failed. Append to escalations.log:
+  jq -nc \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg wizard_id "<id>" \
+    --arg mode "<mode>" \
+    --arg issue_key "<issue_key or null>" \
+    --arg rule "wizard-max-age-exceeded" \
+    --arg attempted "Wizard ran <age>s (>= max_age <max_age>s) and was SIGTERM'd by the coordinator. Likely stuck in a non-terminating shell loop or an MCP call that hung." \
+    --arg needs_from_user "Inspect <state_dir>/logs/*.txt for what the wizard was doing. If the problem is a bug in the prompt (e.g. LLM improvised an impossible-exit loop), fix the prompt. If it's a transient hang, re-submit or manually re-spawn after unblocking." \
+    '{ts:$ts, wizard_id:$wizard_id, mode:$mode, issue_key:$issue_key, pr_urls:null, rule:$rule, attempted:$attempted, needs_from_user:$needs_from_user}' \
+    >> .sorcerer/escalations.log
+  # Append event:
+  printf '{"ts":"%s","event":"wizard-killed-max-age","id":"%s","mode":"%s","age_seconds":%d}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "<id>" "<mode>" "$age" >> .sorcerer/events.log
+  # Skip the remaining step-11 logic for this entry.
+fi
+```
+
+**Why kill + fail instead of kill + respawn**: a wizard that hit its wall-clock ceiling has already been through any 429/529 throttle windows and any heartbeat-respawn cycles. At this age, the bug is almost always in the wizard's run itself (improvised infinite loop, stuck MCP call, etc.) — a fresh spawn would likely hit the same issue. Human needs to look at the log. One PushNotification fires via the escalation.
+
 ## Process liveness (dead-pid detection)
 
 Every spawn captures the `bash scripts/spawn-wizard.sh ...` subprocess PID into the entry's `pid` field. When that subprocess exits — cleanly, on crash, or on kill — the PID is no longer alive. An on-disk `heartbeat` file from an earlier phase of the run can linger AFTER the process dies, so `test -f heartbeat` alone isn't sufficient to conclude "wizard is still working."
@@ -876,6 +939,8 @@ Also check the top-level `paused_until`: if set and now >= paused_until, clear i
 
 For each `active_architects` entry with `status: running`:
 
+**Max-age check (run first).** See "Max wall-clock age" above. Apply with `<mode>="architect"`. If the age exceeds the cap: SIGTERM the pid, mark `status: failed`, append `wizard-killed-max-age` event + an escalation with `rule: wizard-max-age-exceeded`. Skip the rest of 11a for this entry.
+
 ```bash
 mtime=$(stat -c %Y .sorcerer/architects/<id>/heartbeat 2>/dev/null)
 ```
@@ -900,6 +965,8 @@ mtime=$(stat -c %Y .sorcerer/architects/<id>/heartbeat 2>/dev/null)
 
 For each `active_wizards` entry with `mode: design` and `status: running`:
 
+**Max-age check (run first).** See "Max wall-clock age" above. Apply with `<mode>="design"`. If over cap: kill + fail + escalate. Skip the rest.
+
 ```bash
 mtime=$(stat -c %Y .sorcerer/wizards/<id>/heartbeat 2>/dev/null)
 ```
@@ -922,6 +989,8 @@ mtime=$(stat -c %Y .sorcerer/wizards/<id>/heartbeat 2>/dev/null)
 
 For each `active_wizards` entry with `mode: architect-review` or `mode: design-review` and `status: running`:
 
+**Max-age check (run first).** Apply with `<mode>` = the entry's actual mode (`architect-review` or `design-review`). Kill + fail + escalate if over cap. On fail, also mark the parent (architect or designer — follow `subject_id`) `status: failed` since they're blocked without a reviewer verdict. Skip the rest of 11b-r for this entry.
+
 ```bash
 mtime=$(stat -c %Y .sorcerer/wizards/<id>/heartbeat 2>/dev/null)
 ```
@@ -934,6 +1003,8 @@ mtime=$(stat -c %Y .sorcerer/wizards/<id>/heartbeat 2>/dev/null)
 #### 11c. Implement wizards
 
 For each `active_wizards` entry with `mode: implement` and `status: running`:
+
+**Max-age check (run first).** Apply with `<mode>` = whatever spawn phase the entry is currently in — for an initial implement spawn, `implement`; for a feedback-cycle respawn (see step 12.6b), `feedback`; for a rebase respawn (see step 12.6c), `rebase`. Derive the current phase by inspecting the latest log file's name (`spawn.txt` → implement; `feedback-<N>.txt` → feedback; `rebase-<N>.txt` → rebase). If over cap: run the PR-set recovery check first (a max-age wizard may still have durable PRs on GitHub — recover them rather than lose the work). If PRs exist, route to `awaiting-review`. Else kill + fail + escalate. Skip the rest.
 
 ```bash
 mtime=$(stat -c %Y <state_dir>/heartbeat 2>/dev/null)
