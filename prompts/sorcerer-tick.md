@@ -119,23 +119,55 @@ printf '{"ts":"%s","event":"pr-set-recovered","id":"%s","issue_key":"%s","pr_cou
 
 This is only applicable to `mode: implement | feedback | rebase` wizards — the ones that have `branch_name` + `repos` + `state_dir` fields. Architect and designer wizards produce plan/manifest files locally and don't have a PR fallback, so they stay on the original failed/respawn path.
 
-## Rate-limit (429) handling
+## Rate-limit (429) and overload (529) handling
 
-Every wizard spawn is a `claude -p` subprocess. When Anthropic throttles, claude auto-retries up to 10 times internally; if it still can't get through, it exits non-zero and the log contains one of:
+Every wizard spawn is a `claude -p` subprocess. When Anthropic throttles or its servers are overloaded, claude auto-retries internally; if it still can't get through, it exits non-zero. Two distinct failure modes with different recovery:
 
-- `You've hit your limit · resets <when>` — what Claude Code prints when a Max-subscription OAuth session runs out of its 5-hour bucket. There is no HTTP 429 in this case; just this line.
-- `API Error: Request rejected (429)` — the API-key path.
+### 529 — server-side overload (transient, service-wide)
+
+Log shape:
+- `API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment.`
+- `"type": "overloaded_error"`
+
+Key property: 529 is Anthropic's backend saying "I'm busy right now." It applies equally to every provider (Max A, Max B, API keys, Bedrock, Vertex — they all hit the same upstream). Cycling providers does NOT help. The right response is a short retry after a brief cooldown.
+
+**Detection helper**:
+```bash
+is_overloaded_log() {
+  local log="$1"
+  grep -qE "API Error: 529|\"type\":[[:space:]]*\"overloaded_error\"|529 Overloaded" "$log" 2>/dev/null
+}
+```
+
+**Recovery when detected**:
+1. Mark the wizard entry `status: throttled`, `retry_after: <now + 60s>`. Shorter than 429's 5-min default — 529 typically clears fast.
+2. Increment a dedicated `overload_count` on the entry (initialize to 0). Do NOT increment `throttle_count` (that's for 429 strikes).
+3. **Do NOT touch `providers_state`** — the provider isn't the problem, the upstream service is.
+4. `overload_count >= 15` → this is an Anthropic status-page issue, not something recovery cycles will fix. Escalate with `rule: persistent-server-overload` and set the wizard `status: failed`. Point the user at https://status.claude.com in `needs_from_user`.
+5. Append to events.log:
+   ```json
+   {"ts":"...","event":"wizard-overloaded","id":"<id>","mode":"<mode>","retry_after":"<ISO-8601>","overload_count":<N>}
+   ```
+
+### 429 — rate limit (account-specific)
+
+Log shape:
+- `You've hit your limit · resets <when>` — Max-subscription OAuth session runs out of its 5-hour bucket. No HTTP status visible, just this line.
+- `API Error: Request rejected (429)` — API-key path.
 - `"type": "rate_limit_error"` — structured API error.
 - `rate limit` (case-insensitive) in any other error-shaped line.
 
-**Detection helper**: before classifying a wizard crash as `failed`, grep the latest log file for these patterns:
+Key property: 429 is account-specific. Cycling to a different provider DOES help. Mark both the wizard AND the provider throttled.
 
+**Detection helper**:
 ```bash
 is_rate_limited_log() {
   local log="$1"
   grep -qE "You've hit your limit|Request rejected \(429\)|\"type\":[[:space:]]*\"rate_limit_error\"|rate.limit.*exceeded" "$log" 2>/dev/null
 }
 ```
+
+**Classification order** in step 5 failure paths: `is_overloaded_log` first (529 can arrive with no other markers), then `is_rate_limited_log`, then the other recovery paths. They're mutually exclusive — a log doesn't typically contain both.
 
 **Extract reset timestamp when available.** The Max-subscription variant prints a concrete reset time; parsing it gives a much better `throttled_until` than the 5-minute default:
 
@@ -405,8 +437,9 @@ Cases:
   - Update entry: `status: awaiting-architect-review`, `plan_file: .sorcerer/architects/<id>/plan.json`. The next step (5d, below) will spawn the reviewer.
 - `pl=absent, hb=absent` — possible failure:
   - If `now - started_at < 30s`, too early to judge. Skip.
-  - Otherwise: **run the rate-limit detection first** (see "Rate-limit (429) handling" above). If the log matches a 429 pattern, follow the throttle path — do NOT mark `failed` or write an escalation.
-  - Only if no 429 was detected: `status: failed`. Append one JSON line to `.sorcerer/escalations.log`:
+  - Otherwise: **run overload detection first** (see "Rate-limit (429) and overload (529) handling" above). If `is_overloaded_log` matches, follow the 529 path (wizard throttled 60s, NO provider-state change).
+  - Then **rate-limit detection**. If `is_rate_limited_log` matches, follow the 429 throttle path (wizard + provider throttled).
+  - Only if neither 529 nor 429 was detected: `status: failed`. Append one JSON line to `.sorcerer/escalations.log`:
     ```bash
     jq -nc \
       --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -446,8 +479,9 @@ Cases:
   - Update entry: `status: awaiting-design-review`, `manifest_file: .sorcerer/wizards/<id>/manifest.json`, `epic_linear_id: <id>`. The next step (5e, below) will spawn the reviewer.
 - `mf=absent, hb=absent`:
   - If `now - started_at < 30s`, too early to judge. Skip.
-  - Otherwise: **run the rate-limit detection first** (see "Rate-limit (429) handling" above). If the log matches a 429 pattern, follow the throttle path — do NOT mark `failed` or write an escalation.
-  - Only if no 429 was detected: `status: failed`. Append one JSON line to `.sorcerer/escalations.log`:
+  - Otherwise: **run overload detection first** (see "Rate-limit (429) and overload (529) handling" above). If `is_overloaded_log` matches, follow the 529 path (wizard throttled 60s, NO provider-state change).
+  - Then **rate-limit detection**. If `is_rate_limited_log` matches, follow the 429 throttle path (wizard + provider throttled).
+  - Only if neither 529 nor 429 was detected: `status: failed`. Append one JSON line to `.sorcerer/escalations.log`:
     ```bash
     jq -nc \
       --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -503,9 +537,10 @@ Cases:
   - Wizard reported its own failure. Update `status: failed`. Append to `.sorcerer/escalations.log` with `rule: <implement|feedback|rebase>-self-reported-failure`, include the wizard's failure reason.
 - `hb=absent` AND `pr=absent` AND no completion marker in log:
   - If `now - started_at < 30s`, too early — skip.
-  - Otherwise: **run the rate-limit detection first** (see "Rate-limit (429) handling" above). If the latest log matches a 429 pattern, follow the throttle path — do NOT mark `failed` or write an escalation.
+  - Otherwise: **run overload detection first** (see "Rate-limit (429) and overload (529) handling" above). If `is_overloaded_log` matches, follow the 529 path (wizard throttled 60s, NO provider-state change).
+  - Then **rate-limit detection**. If `is_rate_limited_log` matches, follow the 429 throttle path (wizard + provider throttled).
   - Next: **run the PR-set recovery check** (see "PR-set recovery" above). Call `discover_pr_set <branch_name> <repos…>`. If it returns a complete pr_urls map, the wizard completed durably even though it didn't write `pr_urls.json` — write it now, set `status: awaiting-review`, set the entry's `pr_urls` to the discovered map, append a `pr-set-recovered` event with `source: "step5c"`. Do NOT mark failed, do NOT escalate. The next tick's step 12 will evaluate the set normally.
-  - Only if no 429 was detected AND recovery found no PR set: crashed without writing output. `status: failed`. Append to `.sorcerer/escalations.log` with `rule: implement-no-output` (or `feedback-no-output`, `rebase-no-output`).
+  - Only if neither 529 nor 429 was detected AND recovery found no PR set: crashed without writing output. `status: failed`. Append to `.sorcerer/escalations.log` with `rule: implement-no-output` (or `feedback-no-output`, `rebase-no-output`).
 - `pr=present, hb=present` — wizard mid-write; wait for next tick.
 - `hb=present` — wizard still working; step 11c handles staleness.
 
