@@ -45,6 +45,8 @@ jq -r '
       "Throttled (\(.mode) \(short(.id))): retry after \(.retry_after)"
     elif $e == "wizard-resumed" then
       "Resumed (\(.mode) \(short(.id))) after throttle #\(.throttle_count)"
+    elif $e == "provider-throttled" then
+      "Provider throttled: \(.provider) until \(.throttled_until)"
     elif $e == "coordinator-paused" then
       "Coordinator paused until \(.paused_until) — \(.reason)"
     elif $e == "coordinator-resumed" then

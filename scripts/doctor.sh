@@ -72,6 +72,34 @@ else
   no "/wizard skill missing — run 'bash $SORCERER_REPO/scripts/install-skill.sh' (auto-installs from vlad-ko/claude-wizard) or 'curl -sL https://raw.githubusercontent.com/vlad-ko/claude-wizard/main/install.sh | bash'"
 fi
 
+# === Provider cycling (config.providers) ===
+section "Provider slots"
+if [[ ! -f "$STATE/config.json" ]]; then
+  warn "skipped — $STATE/config.json not bootstrapped yet"
+else
+  provider_count=$(jq -r '(.providers // []) | length' "$STATE/config.json")
+  if [[ "$provider_count" == "0" ]]; then
+    warn "no providers configured — sorcerer will use ambient auth only (no cycling on 429)"
+  else
+    ok "$provider_count provider slot(s) declared in $STATE/config.json"
+    # For each ${VAR} reference in any provider's env map, check that VAR is set.
+    while IFS=$'\t' read -r prov_name key val; do
+      [[ -z "$prov_name" ]] && continue
+      if [[ "$val" =~ ^\$\{(.+)\}$ ]]; then
+        varname="${BASH_REMATCH[1]}"
+        if [[ -n "${!varname:-}" ]]; then
+          ok "  provider $prov_name: \$$varname is set"
+        else
+          no "  provider $prov_name: \$$varname referenced by env.$key but NOT set in the shell (add 'export $varname=...' to ~/.shell_env)"
+        fi
+      fi
+    done < <(jq -r '
+      (.providers // [])[] as $p | ($p.env // {}) | to_entries[] |
+      "\($p.name)\t\(.key)\t\(.value)"
+    ' "$STATE/config.json")
+  fi
+fi
+
 # === claude CLI capability ===
 section "claude CLI capability"
 if claude --help 2>&1 | grep -qE -- '--effort[[:space:]]'; then

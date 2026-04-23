@@ -81,6 +81,30 @@ case "$ARG" in
         fi
       fi
 
+      # Per-provider state, if providers are configured.
+      provider_count=$(jq -r '(.providers_state // {}) | length' "$STATE_FILE")
+      if [[ "$provider_count" != "0" ]]; then
+        echo
+        echo "Providers:"
+        now_epoch=$(date +%s)
+        while IFS=$'\t' read -r name tu count; do
+          [[ -z "$name" ]] && continue
+          if [[ -z "$tu" || "$tu" == "null" ]]; then
+            printf "  %-24s available\n" "$name"
+          else
+            tu_epoch=$(date -d "$tu" +%s 2>/dev/null || echo 0)
+            if (( tu_epoch > now_epoch )); then
+              printf "  %-24s throttled (%ds remaining, until %s, throttled %s times)\n" "$name" "$(( tu_epoch - now_epoch ))" "$tu" "$count"
+            else
+              printf "  %-24s available (cooled down)\n" "$name"
+            fi
+          fi
+        done < <(jq -r '
+          (.providers_state // {}) | to_entries[] |
+          "\(.key)\t\(.value.throttled_until // "")\t\(.value.throttle_count // 0)"
+        ' "$STATE_FILE")
+      fi
+
       # Summary counts by status, per actor type.
       echo
       echo "Architects:"
@@ -341,7 +365,8 @@ EOF
       merge: {
         strategy:      "squash",
         delete_branch: true
-      }
+      },
+      providers: []
     }' > "$STATE/config.json"
   echo "Bootstrapped $STATE/config.json (repo: github.com/$slug, team: $team_key)"
   echo "Edit it to adjust — in particular add other repos if this work spans multiple."

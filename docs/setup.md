@@ -217,6 +217,71 @@ Fails on:
 
 Fix anything fatal before starting `/loop`.
 
+## Provider cycling (multiple Anthropic subscriptions / API keys)
+
+By default sorcerer uses whatever ambient auth is active when you launch the coordinator (your Max subscription at `~/.claude`, or whatever `ANTHROPIC_API_KEY` / Bedrock / Vertex env vars are set). When a single subscription runs out of capacity (HTTP 429), the coordinator pauses everything until the bucket replenishes.
+
+If you have more than one auth slot — two Max subscriptions, a Max plus an API key, direct Anthropic plus Bedrock, etc. — sorcerer can cycle between them automatically.
+
+### Generating tokens for Max subscriptions
+
+For each Max subscription you want in the rotation, generate a long-lived OAuth token:
+
+```
+claude setup-token
+```
+
+That prints a `sk-ant-...` token you can store in an env var. Run it once per Max subscription, logging in as the corresponding account each time. Stash the tokens in `~/.shell_env`:
+
+```sh
+export CLAUDE_CODE_OAUTH_TOKEN_A='sk-ant-oat-...'   # primary Max account
+export CLAUDE_CODE_OAUTH_TOKEN_B='sk-ant-oat-...'   # secondary Max account
+```
+
+For API-key slots, export under distinct names:
+
+```sh
+export ANTHROPIC_API_KEY_PERSONAL='sk-ant-api03-...'
+export ANTHROPIC_API_KEY_WORK='sk-ant-api03-...'
+```
+
+### Declaring the rotation in `config.json`
+
+```json
+"providers": [
+  {
+    "name": "max-primary",
+    "env": {
+      "CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN_A}"
+    }
+  },
+  {
+    "name": "max-secondary",
+    "env": {
+      "CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN_B}"
+    }
+  }
+]
+```
+
+Rules:
+- Order matters. Strict primary → fallback: the coordinator and every spawn use the first provider in the list whose `providers_state[name].throttled_until` is either unset or in the past. It never round-robins.
+- `${NAME}` values expand from the shell env at spawn time. Secrets stay in `~/.shell_env`, not `config.json`.
+- Literal values (no `${…}`) are exported verbatim — useful for `CLAUDE_CODE_USE_BEDROCK=1`, `AWS_PROFILE=...`, etc.
+- Optional per-provider `"models": {...}` overrides the top-level `models` map. Required for Bedrock, which uses `anthropic.claude-opus-4-7` instead of `claude-opus-4-7`.
+- Omit the `providers` key (or use `[]`) to disable cycling and run against ambient auth.
+
+### What happens on 429
+
+1. The wizard's log matches the 429 pattern. Coordinator marks the wizard `throttled` AND the provider it ran on `throttled_until: now+5min`.
+2. Next spawn: `scripts/apply-provider-env.sh` skips the throttled provider and picks the next one in order. Work resumes immediately on the fallback slot.
+3. If every provider is currently throttled, the coordinator sets `paused_until = earliest throttled_until` and sleeps until the first slot reopens. `/sorcerer status` surfaces the pause.
+4. A single wizard that throttles three times in a row (across all providers) escalates with `rule: persistent-throttle` — that's pathological, not a cycling problem.
+
+### Doctor check
+
+`scripts/doctor.sh` reports per-provider whether the env vars referenced by `${…}` are actually set in the shell. Missing env vars → FAIL with the exact name to export.
+
 ## Reducing merge conflicts on shared docs
 
 Sorcerer can run many wizards in parallel; each opens a PR against the same default branch. Shared append-only docs (STATUS.md, CHANGELOG.md, a progress roadmap, `.gitattributes` itself) tend to cause conflicts when two wizards append at the end.
