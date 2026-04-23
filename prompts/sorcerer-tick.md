@@ -72,20 +72,42 @@ From here the existing `hb=present` / `hb=absent` branches work unchanged — a 
 
 ## Rate-limit (429) handling
 
-Every wizard spawn is a `claude -p` subprocess. When Anthropic's quota throttles, claude auto-retries up to 10 times internally; if it still can't get through, it exits non-zero and the log contains one of:
+Every wizard spawn is a `claude -p` subprocess. When Anthropic throttles, claude auto-retries up to 10 times internally; if it still can't get through, it exits non-zero and the log contains one of:
 
-- `API Error: Request rejected (429)`
-- `"type": "rate_limit_error"`
-- `rate limit` (case-insensitive) in a structured error line
+- `You've hit your limit · resets <when>` — what Claude Code prints when a Max-subscription OAuth session runs out of its 5-hour bucket. There is no HTTP 429 in this case; just this line.
+- `API Error: Request rejected (429)` — the API-key path.
+- `"type": "rate_limit_error"` — structured API error.
+- `rate limit` (case-insensitive) in any other error-shaped line.
 
 **Detection helper**: before classifying a wizard crash as `failed`, grep the latest log file for these patterns:
 
 ```bash
 is_rate_limited_log() {
   local log="$1"
-  grep -qE 'Request rejected \(429\)|"type":[[:space:]]*"rate_limit_error"|rate.limit.*exceeded' "$log" 2>/dev/null
+  grep -qE "You've hit your limit|Request rejected \(429\)|\"type\":[[:space:]]*\"rate_limit_error\"|rate.limit.*exceeded" "$log" 2>/dev/null
 }
 ```
+
+**Extract reset timestamp when available.** The Max-subscription variant prints a concrete reset time; parsing it gives a much better `throttled_until` than the 5-minute default:
+
+```bash
+extract_reset_iso() {
+  local log="$1"
+  local line clean parsed
+  line=$(grep -oE "resets [A-Za-z]+ [0-9]+, [0-9]+(:[0-9]+)?\s*(am|pm|AM|PM)?\s*\(?[A-Za-z]+\)?" "$log" 2>/dev/null | head -1)
+  [[ -z "$line" ]] && return 1
+  clean=$(echo "$line" | sed -E 's/^resets //; s/\s*\(([^)]+)\)\s*$/ \1/; s/,//')
+  parsed=$(date -u -d "$clean" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || return 1
+  # Guard against past times (stale logs, bad parse).
+  local parsed_epoch now_epoch
+  parsed_epoch=$(date -u -d "$parsed" +%s 2>/dev/null || echo 0)
+  now_epoch=$(date +%s)
+  (( parsed_epoch > now_epoch )) || return 1
+  printf '%s\n' "$parsed"
+}
+```
+
+Use `extract_reset_iso` to populate `retry_after` for the wizard and `providers_state[$P].throttled_until` for the provider. Fall back to `now + 300s` only when `extract_reset_iso` returns non-zero.
 
 **Which provider ran this wizard?** Read `<state_dir>/provider` (written by `scripts/spawn-wizard.sh` at spawn time). When empty or missing, `config.json:providers` is unconfigured and there's nothing to mark throttled — only the wizard itself gets the `throttled` status.
 

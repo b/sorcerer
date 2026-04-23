@@ -125,8 +125,13 @@ while true; do
   # If the tick itself hit a rate limit, the in-tick throttle-detection logic
   # never ran (the tick died before it could write state). Do it here in the
   # loop so the NEXT iteration picks a different provider.
+  #
+  # Matches both the API error shape ("Request rejected (429)", etc.) and the
+  # Max-subscription UI shape ("You've hit your limit · resets <when>"). The
+  # Max variant is what Claude Code prints when an OAuth-logged-in subscription
+  # runs out of its 5-hour bucket; there is no HTTP 429, just this line.
   if (( tick_rc != 0 )) && [[ -f "$TICK_LOG" ]] \
-     && grep -qE 'Request rejected \(429\)|"type":[[:space:]]*"rate_limit_error"|rate.limit.*exceeded' "$TICK_LOG"; then
+     && grep -qE "You've hit your limit|Request rejected \(429\)|\"type\":[[:space:]]*\"rate_limit_error\"|rate.limit.*exceeded" "$TICK_LOG"; then
     # Re-run the helper in a throwaway subshell just to identify which provider
     # was active for this tick. The helper is idempotent and doesn't write state.
     tick_provider=$(
@@ -137,7 +142,29 @@ while true; do
     )
     if [[ -n "$tick_provider" ]]; then
       now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-      throttled_until=$(date -u -d "+300 seconds" +%Y-%m-%dT%H:%M:%SZ)
+
+      # Prefer the exact reset timestamp when claude prints one ("resets Apr
+      # 24, 1am (UTC)"). Much better than the 5-minute default — a Max bucket
+      # that's said "resets at X" will 429 again every retry until X.
+      # Falls back to now+300s when no reset string is present.
+      throttled_until=""
+      reset_line=$(grep -oE "resets [A-Za-z]+ [0-9]+, [0-9]+(:[0-9]+)?\s*(am|pm|AM|PM)?\s*\(?[A-Za-z]+\)?" "$TICK_LOG" 2>/dev/null | head -1 || true)
+      if [[ -n "$reset_line" ]]; then
+        reset_clean=$(echo "$reset_line" | sed -E 's/^resets //; s/\s*\(([^)]+)\)\s*$/ \1/; s/,//')
+        parsed=$(date -u -d "$reset_clean" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+        # Guard against the parsed time being in the past (stale log, bad parse)
+        if [[ -n "$parsed" ]]; then
+          parsed_epoch=$(date -u -d "$parsed" +%s 2>/dev/null || echo 0)
+          now_epoch=$(date +%s)
+          if (( parsed_epoch > now_epoch )); then
+            throttled_until="$parsed"
+            echo "[$(ts)] parsed reset time from log: $throttled_until"
+          fi
+        fi
+      fi
+      if [[ -z "$throttled_until" ]]; then
+        throttled_until=$(date -u -d "+300 seconds" +%Y-%m-%dT%H:%M:%SZ)
+      fi
       # Write throttle state. If sorcerer.json doesn't exist yet, seed it.
       mkdir -p .sorcerer
       [[ -f .sorcerer/sorcerer.json ]] || echo '{}' > .sorcerer/sorcerer.json
