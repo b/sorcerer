@@ -49,5 +49,21 @@
   "merge": {
     "strategy": "squash",
     "delete_branch": true
-  }
+  },
+
+  "_providers_comment": "Primary → fallback auth slots. scripts/apply-provider-env.sh picks the first entry whose providers_state[name].throttled_until is null or in the past and exports its env map before each claude -p call. ${VAR} expands from the shell env (so put the secrets in ~/.shell_env, not here). Omit the whole key or use [] to run against ambient auth only.",
+  "providers": [
+    {
+      "name": "max-primary",
+      "env": {
+        "CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN_A}"
+      }
+    },
+    {
+      "name": "max-secondary",
+      "env": {
+        "CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN_B}"
+      }
+    }
+  ]
 }

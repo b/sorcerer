@@ -27,7 +27,7 @@ The user is not watching the terminal between ticks — events.log is attached o
 - `token-refreshed`, `tick-complete`
 - `architect-spawned`, `designer-spawned`, `implement-spawned`, `*-stale-respawn`
 - `designer-completed`, `implement-completed`, `feedback-completed`, `review-merge`, `wizard-archived`, `architect-archived`
-- `wizard-throttled`, `wizard-resumed`, `coordinator-resumed` — individual throttles are routine recoverable events; only the coordinator-level `coordinator-paused` warrants attention.
+- `wizard-throttled`, `wizard-resumed`, `coordinator-resumed`, `provider-throttled` — individual throttles and single-provider rotations are routine recoverable events; only the coordinator-level `coordinator-paused` (which means EVERY slot is exhausted or ambient auth is the only option) warrants attention.
 - Any concurrency-deferred log line.
 - Any "skipped step-N" stub log line.
 
@@ -87,16 +87,24 @@ is_rate_limited_log() {
 }
 ```
 
-If detected: the wizard did NOT fail — it hit a quota wall. Do the following instead of the normal failed path:
+**Which provider ran this wizard?** Read `<state_dir>/provider` (written by `scripts/spawn-wizard.sh` at spawn time). When empty or missing, `config.json:providers` is unconfigured and there's nothing to mark throttled — only the wizard itself gets the `throttled` status.
+
+If 429 detected:
 
 1. Mark the entry `status: throttled`, `retry_after: <ISO-8601>` (compute: `now + 300s`, floor). Do NOT increment `respawn_count`; throttling isn't a crash.
 2. Increment a `throttle_count` field on the entry (initialize to 0).
-3. If `throttle_count >= 3`: give up on graceful handling — this entry keeps getting throttled. Escalate with `rule: persistent-throttle`, `mode: <mode>`, `issue_key: <SOR-N or null>`, and set `status: failed`. (The user probably needs to pause the coordinator or raise their plan.)
-4. Append `{"ts":"...","event":"wizard-throttled","id":"<id>","mode":"<mode>","retry_after":"<ISO-8601>","throttle_count":<N>}` to events.log.
+3. **If `<state_dir>/provider` is non-empty** (let its content be `$P`): mark the provider as throttled too — set `.providers_state[$P].throttled_until = <same ISO-8601>`, `.providers_state[$P].throttle_count += 1`, `.providers_state[$P].last_throttled_at = now`. Append:
+   ```json
+   {"ts":"...","event":"provider-throttled","provider":"<P>","throttled_until":"<ISO-8601>"}
+   ```
+4. If `throttle_count >= 3` on the WIZARD entry: escalate with `rule: persistent-throttle`, `mode: <mode>`, `issue_key: <SOR-N or null>`, and set `status: failed`. The 3-strike rule is per-wizard, not per-provider — a provider that throttles many different wizards is working as intended (cycling kicks in). A single wizard that throttles three times across all providers suggests something deeper.
+5. Append `{"ts":"...","event":"wizard-throttled","id":"<id>","mode":"<mode>","provider":"<P or null>","retry_after":"<ISO-8601>","throttle_count":<N>}` to events.log.
 
-**Global pause**: if this tick detected ≥3 wizard throttles (new `throttled` transitions), set `paused_until: <ISO-8601>` on `sorcerer.json` to `now + 900s` (15 min). The coordinator loop honors this before the next tick. Append event `{"ts":"...","event":"coordinator-paused","paused_until":"<ISO-8601>","reason":"rate-limit-storm"}`.
+**Provider cycling (strict primary → fallback)**: when the tick spawns a wizard, `scripts/spawn-wizard.sh` automatically picks the first provider in `config.providers` whose `providers_state[name].throttled_until` is null or in the past. The tick itself doesn't need to choose — just rely on the spawn script. Rotation happens on the next spawn; the current wizard finishes (or throttles again) first.
 
-**Resuming**: steps 11a/b/c treat `status: throttled` identically to `status: stale`, but the trigger is `now >= retry_after` instead of heartbeat age, and respawn_count is NOT consulted or incremented.
+**Global pause** (all-slots-exhausted): if EVERY provider in `config.providers` is currently throttled, set `sorcerer.json:paused_until` to the earliest `providers_state[*].throttled_until` (the first slot that will reopen). Append `{"ts":"...","event":"coordinator-paused","paused_until":"<ISO-8601>","reason":"all-providers-throttled"}` and `coordinator-loop.sh` sleeps until then. If `providers` is unconfigured and three wizards throttle in one tick (legacy single-slot behavior), still set `paused_until = now + 900s` with `reason: "rate-limit-storm"` — the ambient-auth case.
+
+**Resuming**: steps 11a/b/c treat `status: throttled` identically to `status: stale`, but the trigger is `now >= retry_after` instead of heartbeat age, and respawn_count is NOT consulted or incremented. Provider-level resume is implicit: `scripts/apply-provider-env.sh` skips throttled providers on every spawn; when a slot's `throttled_until` passes, it's eligible again automatically.
 
 ## State files
 
@@ -104,6 +112,13 @@ If detected: the wizard did NOT fail — it hit a quota wall. Do the following i
 ```json
 {
   "paused_until": "<ISO-8601 or null>",
+  "providers_state": {
+    "<provider name>": {
+      "throttled_until":    "<ISO-8601 or null>",
+      "throttle_count":     0,
+      "last_throttled_at":  "<ISO-8601 or null>"
+    }
+  },
   "active_architects": [
     {
       "id": "<uuid>",

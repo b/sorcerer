@@ -87,15 +87,35 @@ while true; do
   # keeps working; an operator who wants a specific model or downgraded
   # effort edits .sorcerer/config.json.
   TICK_ARGS=(--output-format text --permission-mode bypassPermissions)
-  if [[ -f .sorcerer/config.json ]]; then
-    tick_model=$(jq -r '.models.coordinator // ""' .sorcerer/config.json 2>/dev/null || echo "")
-    tick_effort=$(jq -r '.effort.coordinator // ""' .sorcerer/config.json 2>/dev/null || echo "")
-    [[ -n "$tick_model"  ]] && TICK_ARGS+=(--model  "$tick_model")
-    [[ -n "$tick_effort" ]] && TICK_ARGS+=(--effort "$tick_effort")
-  fi
-  if ! claude -p "${TICK_ARGS[@]}" "$TICK_PROMPT" < /dev/null; then
-    echo "[$(ts)] tick exited non-zero"
-  fi
+
+  # Pick the active provider (primary → fallback) and apply its env vars.
+  # When config.providers is absent/empty, this is a no-op and the tick
+  # runs against whatever ambient auth the caller has.
+  (
+    # Subshell so exported vars don't leak across loop iterations when the
+    # active provider rotates. The claude -p inside inherits them.
+    # shellcheck source=/dev/null
+    source "$SORCERER_REPO/scripts/apply-provider-env.sh" \
+      ".sorcerer/config.json" ".sorcerer/sorcerer.json"
+    if [[ -n "$SORCERER_ACTIVE_PROVIDER" ]]; then
+      echo "[$(ts)] tick provider: $SORCERER_ACTIVE_PROVIDER"
+      # Per-provider model override wins over top-level models.coordinator.
+      tick_model=$(echo "$SORCERER_PROVIDER_MODELS" | jq -r '.coordinator // ""' 2>/dev/null || echo "")
+    else
+      tick_model=""
+      [[ -n "$SORCERER_PROVIDER_REASON" ]] && echo "[$(ts)] tick provider: <none> ($SORCERER_PROVIDER_REASON)"
+    fi
+    if [[ -f .sorcerer/config.json ]]; then
+      [[ -z "$tick_model"  ]] && tick_model=$(jq -r '.models.coordinator // ""' .sorcerer/config.json 2>/dev/null || echo "")
+      tick_effort=$(jq -r '.effort.coordinator // ""' .sorcerer/config.json 2>/dev/null || echo "")
+      [[ -n "$tick_model"  ]] && TICK_ARGS+=(--model  "$tick_model")
+      [[ -n "$tick_effort" ]] && TICK_ARGS+=(--effort "$tick_effort")
+    fi
+    export SORCERER_ACTIVE_PROVIDER   # spawned wizards default to this
+    if ! claude -p "${TICK_ARGS[@]}" "$TICK_PROMPT" < /dev/null; then
+      echo "[$(ts)] tick exited non-zero"
+    fi
+  )
 
   # Pacing: 30s while anything is actively running, 60s otherwise.
   if [[ -f .sorcerer/sorcerer.json ]] && jq -e '

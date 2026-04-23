@@ -23,6 +23,8 @@
 #   --state-dir <path>               override the default state_dir computation
 #   --model <name>                   override config.models.<role> (claude default otherwise)
 #   --effort <level>                 override config.effort.<role>; low | medium | high | xhigh | max
+#   --provider <name>                override the auto-selected provider (config.providers[].name);
+#                                    omit to let apply-provider-env.sh pick per primary→fallback rules
 #   --wizard-id <uuid>               use this UUID instead of generating one (lets
 #                                    the coordinator pre-create state/<parent>/<id>/
 #                                    and track sessions by a known id)
@@ -54,6 +56,7 @@ esac
 REQUEST_FILE=""
 MODEL=""
 EFFORT=""
+PROVIDER_OVERRIDE=""
 WIZARD_ID_OVERRIDE=""
 ARCHITECT_PLAN_FILE=""
 SUB_EPIC_INDEX=""
@@ -70,6 +73,9 @@ while [[ $# -gt 0 ]]; do
     --effort)
       [[ $# -ge 2 ]] || { echo "ERROR: --effort requires a value" >&2; exit 2; }
       EFFORT="$2"; shift 2 ;;
+    --provider)
+      [[ $# -ge 2 ]] || { echo "ERROR: --provider requires a value" >&2; exit 2; }
+      PROVIDER_OVERRIDE="$2"; shift 2 ;;
     --wizard-id)
       [[ $# -ge 2 ]] || { echo "ERROR: --wizard-id requires a value" >&2; exit 2; }
       WIZARD_ID_OVERRIDE="$2"; shift 2 ;;
@@ -359,13 +365,60 @@ case "$MODE" in
   *)                          ROLE_KEY=""          ;;
 esac
 
-if [[ -n "$ROLE_KEY" && -f "$CONFIG" ]]; then
+# Pick the active provider and export its env. A --provider flag overrides
+# the auto-selection; otherwise apply-provider-env.sh picks primary→fallback.
+# When no providers are configured this is a no-op.
+PROVIDER_MODELS_JSON="{}"
+if [[ -n "$PROVIDER_OVERRIDE" ]]; then
+  # Explicit override: just look up that provider and export its env.
+  if [[ -f "$CONFIG" ]] && jq -e --arg p "$PROVIDER_OVERRIDE" '(.providers // []) | any(.name == $p)' "$CONFIG" >/dev/null 2>&1; then
+    while IFS=$'\t' read -r _k _v; do
+      [[ -z "$_k" ]] && continue
+      if [[ "$_v" =~ ^\$\{(.+)\}$ ]]; then
+        _varname="${BASH_REMATCH[1]}"
+        _v="${!_varname:-}"
+      fi
+      export "$_k=$_v"
+    done < <(jq -r --arg p "$PROVIDER_OVERRIDE" '
+      (.providers // [])[] | select(.name == $p) | (.env // {}) | to_entries[] |
+      "\(.key)\t\(.value)"
+    ' "$CONFIG")
+    PROVIDER_MODELS_JSON=$(jq -rc --arg p "$PROVIDER_OVERRIDE" '
+      (.providers // [])[] | select(.name == $p) | (.models // {})
+    ' "$CONFIG")
+    SORCERER_ACTIVE_PROVIDER="$PROVIDER_OVERRIDE"
+    echo "spawn provider: $PROVIDER_OVERRIDE (explicit --provider override)"
+  else
+    echo "ERROR: --provider $PROVIDER_OVERRIDE not found in $CONFIG" >&2
+    exit 1
+  fi
+else
+  # shellcheck source=/dev/null
+  source "$SORCERER_REPO/scripts/apply-provider-env.sh" "$CONFIG" "$STATE/sorcerer.json"
+  PROVIDER_MODELS_JSON="$SORCERER_PROVIDER_MODELS"
+  [[ -n "$SORCERER_ACTIVE_PROVIDER" ]] && echo "spawn provider: $SORCERER_ACTIVE_PROVIDER"
+fi
+
+if [[ -n "$ROLE_KEY" ]]; then
+  # Per-provider model override wins over top-level config.models.<role>.
   if [[ -z "$MODEL" ]]; then
-    MODEL=$(jq -r --arg k "$ROLE_KEY" '.models[$k] // ""' "$CONFIG" 2>/dev/null || echo "")
+    MODEL=$(echo "$PROVIDER_MODELS_JSON" | jq -r --arg k "$ROLE_KEY" '.[$k] // ""' 2>/dev/null || echo "")
   fi
-  if [[ -z "$EFFORT" ]]; then
-    EFFORT=$(jq -r --arg k "$ROLE_KEY" '.effort[$k] // ""' "$CONFIG" 2>/dev/null || echo "")
+  if [[ -n "$ROLE_KEY" && -f "$CONFIG" ]]; then
+    if [[ -z "$MODEL" ]]; then
+      MODEL=$(jq -r --arg k "$ROLE_KEY" '.models[$k] // ""' "$CONFIG" 2>/dev/null || echo "")
+    fi
+    if [[ -z "$EFFORT" ]]; then
+      EFFORT=$(jq -r --arg k "$ROLE_KEY" '.effort[$k] // ""' "$CONFIG" 2>/dev/null || echo "")
+    fi
   fi
+fi
+
+# Record the active provider so the tick's 429-detection path can mark the
+# right provider as throttled (not just the wizard). Empty file is fine when
+# no providers are configured — the tick treats it as "ambient auth".
+if [[ -n "${SORCERER_ACTIVE_PROVIDER:-}" ]]; then
+  echo "$SORCERER_ACTIVE_PROVIDER" > "$STATE_DIR/provider"
 fi
 
 echo "spawning wizard:"
