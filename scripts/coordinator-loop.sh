@@ -29,9 +29,31 @@ TICK_PROMPT_FILE="$SORCERER_REPO/prompts/sorcerer-tick.md"
 [[ -f "$TICK_PROMPT_FILE" ]] || { echo "ERROR: missing $TICK_PROMPT_FILE" >&2; exit 1; }
 TICK_PROMPT="$(cat "$TICK_PROMPT_FILE")"
 
-trap 'rm -f "$PID_FILE"' EXIT
-
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# --- Exit-cause diagnostics --------------------------------------------------
+# The coordinator has been observed silently dying between ticks. We don't have
+# set -e, but `set -u` exits on unbound-variable access, and pipefail surfaces
+# pipeline failures. Both trigger ERR. Log the offending line + command so the
+# next time the loop dies, we have a traceable cause.
+on_err() {
+  local rc=$?
+  echo "[$(ts)] coordinator-loop ERR rc=$rc line=${BASH_LINENO[0]:-?} cmd=${BASH_COMMAND:-?}" >&2
+}
+trap on_err ERR
+
+on_exit() {
+  local rc=$?
+  if (( rc != 0 )); then
+    echo "[$(ts)] coordinator-loop EXITING rc=$rc line=${BASH_LINENO[0]:-?} cmd=${BASH_COMMAND:-?}" >&2
+  fi
+  rm -f "$PID_FILE"
+}
+trap on_exit EXIT
+
+trap 'echo "[$(ts)] coordinator-loop received SIGTERM" >&2; exit 143' TERM
+trap 'echo "[$(ts)] coordinator-loop received SIGHUP (shouldn'\''t happen under nohup)" >&2; exit 129' HUP
+trap 'echo "[$(ts)] coordinator-loop received SIGINT" >&2; exit 130' INT
 
 has_in_flight_work() {
   # See docs/lifecycle.md for the status taxonomy. The loop keeps running as
