@@ -47,6 +47,8 @@ jq -r '
       "Resumed (\(.mode) \(short(.id))) after throttle #\(.throttle_count)"
     elif $e == "provider-throttled" then
       "Provider throttled: \(.provider) until \(.throttled_until)"
+    elif $e == "pr-set-recovered" then
+      "Recovered \(.issue_key) from stale heartbeat — \(.pr_count) open PR(s) already on GitHub; queued for review"
     elif $e == "coordinator-paused" then
       "Coordinator paused until \(.paused_until) — \(.reason)"
     elif $e == "coordinator-resumed" then

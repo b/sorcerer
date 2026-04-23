@@ -70,6 +70,55 @@ fi
 
 From here the existing `hb=present` / `hb=absent` branches work unchanged — a dead PID with a leftover heartbeat routes through the same paths as a clean "heartbeat was removed on exit".
 
+## PR-set recovery (for implement / feedback / rebase wizards)
+
+A wizard can do real work — push commits, open PRs — and then die before writing its completion marker or removing the heartbeat (crash, OOM, the claude subprocess itself hitting a limit mid-sentence, machine reboot, etc). The cheap-but-wrong move is to mark the entry `failed` and escalate. The right move is to check GitHub first: **if every repo in the wizard's `repos` has an open PR on its `branch_name`, the wizard's output is already durable — reconstruct `pr_urls.json` from `gh` and transition the entry to `awaiting-review`**. Step 12 will re-evaluate the set and do the appropriate next thing (merge / refer-back / rebase) on its own terms.
+
+**Helper** (used in step 5c's "crashed without writing output" path and step 11c's stale-heartbeat respawn path):
+
+```bash
+# Try to discover the PR set from GitHub for an implement/feedback/rebase
+# wizard entry. Returns 0 and prints a JSON object of {repo: pr_url} to stdout
+# when every repo has an open PR; returns 1 (prints nothing) otherwise.
+discover_pr_set() {
+  local branch="$1"; shift  # branch_name; all repos use the same branch
+  local repos=("$@")        # repos from issue.repos (e.g. "github.com/owner/name")
+  local pairs=()
+  for r in "${repos[@]}"; do
+    local slug="${r#github.com/}"
+    local url
+    url=$(gh pr list --repo "$slug" --head "$branch" --state open --json url --jq '.[0].url // empty' 2>/dev/null)
+    [[ -n "$url" ]] || return 1   # any missing PR = not a full set; don't recover
+    pairs+=("--arg" "r${#pairs[@]}" "$slug" "--arg" "u${#pairs[@]}" "$url")
+  done
+  # Build the JSON with jq -n; pair indices are r0/u0, r2/u2, r4/u4 (every other).
+  # Simpler: iterate again and jq-add each pair.
+  local json='{}'
+  local i=0
+  for r in "${repos[@]}"; do
+    local slug="${r#github.com/}"
+    local url
+    url=$(gh pr list --repo "$slug" --head "$branch" --state open --json url --jq '.[0].url // empty' 2>/dev/null)
+    json=$(echo "$json" | jq --arg k "$slug" --arg v "$url" '. + {($k): $v}')
+    i=$((i+1))
+  done
+  printf '%s\n' "$json"
+}
+```
+
+**Recovery action** (write pr_urls.json, transition to awaiting-review, append event):
+
+```bash
+# Given a wizard entry and a discovered pr_set JSON object:
+echo "$pr_set_json" > "$state_dir/pr_urls.json"
+# Update the entry: status=awaiting-review, pr_urls=<pr_set_json>
+# Append:
+printf '{"ts":"%s","event":"pr-set-recovered","id":"%s","issue_key":"%s","pr_count":%d,"source":"<step5|step11>"}\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$wizard_id" "$issue_key" "$pr_count" >> .sorcerer/events.log
+```
+
+This is only applicable to `mode: implement | feedback | rebase` wizards — the ones that have `branch_name` + `repos` + `state_dir` fields. Architect and designer wizards produce plan/manifest files locally and don't have a PR fallback, so they stay on the original failed/respawn path.
+
 ## Rate-limit (429) handling
 
 Every wizard spawn is a `claude -p` subprocess. When Anthropic throttles, claude auto-retries up to 10 times internally; if it still can't get through, it exits non-zero and the log contains one of:
@@ -430,7 +479,8 @@ Cases:
 - `hb=absent` AND `pr=absent` AND no completion marker in log:
   - If `now - started_at < 30s`, too early — skip.
   - Otherwise: **run the rate-limit detection first** (see "Rate-limit (429) handling" above). If the latest log matches a 429 pattern, follow the throttle path — do NOT mark `failed` or write an escalation.
-  - Only if no 429 was detected: crashed without writing output. `status: failed`. Append to `.sorcerer/escalations.log` with `rule: implement-no-output` (or `feedback-no-output`, `rebase-no-output`).
+  - Next: **run the PR-set recovery check** (see "PR-set recovery" above). Call `discover_pr_set <branch_name> <repos…>`. If it returns a complete pr_urls map, the wizard completed durably even though it didn't write `pr_urls.json` — write it now, set `status: awaiting-review`, set the entry's `pr_urls` to the discovered map, append a `pr-set-recovered` event with `source: "step5c"`. Do NOT mark failed, do NOT escalate. The next tick's step 12 will evaluate the set normally.
+  - Only if no 429 was detected AND recovery found no PR set: crashed without writing output. `status: failed`. Append to `.sorcerer/escalations.log` with `rule: implement-no-output` (or `feedback-no-output`, `rebase-no-output`).
 - `pr=present, hb=present` — wizard mid-write; wait for next tick.
 - `hb=present` — wizard still working; step 11c handles staleness.
 
@@ -694,6 +744,8 @@ mtime=$(stat -c %Y <state_dir>/heartbeat 2>/dev/null)
 
 - If `mtime` is empty: step 5c handles it. Skip.
 - If `now - mtime > 300`: stale.
+  - **PR-set recovery check (run before respawn).** Call `discover_pr_set <branch_name> <repos…>` (see "PR-set recovery" above). If it returns a complete pr_urls map, the wizard effectively finished its work — the stale heartbeat just means it died during cleanup. Write `pr_urls.json`, set `status: awaiting-review`, set the entry's `pr_urls` to the discovered map, append `pr-set-recovered` with `source: "step11c"`. Do NOT respawn, do NOT increment `respawn_count`.
+  - Only if recovery found no PR set: proceed with the respawn-or-fail path below.
   - `respawn_count == 0`: increment, re-spawn:
     ```bash
     nohup bash scripts/spawn-wizard.sh implement \
