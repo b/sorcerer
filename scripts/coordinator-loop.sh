@@ -148,6 +148,29 @@ while true; do
   )
   tick_rc=$?
 
+  # --- Transient service-side overload (HTTP 529) ---------------------------
+  # 529 is "Anthropic servers are overloaded" — NOT a rate-limit on this
+  # account. Switching providers wouldn't help (Anthropic's backend is shared
+  # across Max/API/Bedrock). The right response: short transient pause, let
+  # the next iteration retry with the SAME provider. No provider-level
+  # throttle, no per-provider state mutation.
+  if (( tick_rc != 0 )) && [[ -f "$TICK_LOG" ]] \
+     && grep -qE "API Error: 529|\"type\":[[:space:]]*\"overloaded_error\"|529 Overloaded" "$TICK_LOG"; then
+    now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    pause_until=$(date -u -d "+60 seconds" +%Y-%m-%dT%H:%M:%SZ)
+    mkdir -p .sorcerer
+    [[ -f .sorcerer/sorcerer.json ]] || echo '{}' > .sorcerer/sorcerer.json
+    jq --arg pu "$pause_until" '.paused_until = $pu' .sorcerer/sorcerer.json \
+      > .sorcerer/sorcerer.json.tmp && mv .sorcerer/sorcerer.json.tmp .sorcerer/sorcerer.json
+    printf '{"ts":"%s","event":"coordinator-paused","paused_until":"%s","reason":"server-overload-529"}\n' \
+      "$now_iso" "$pause_until" >> .sorcerer/events.log
+    echo "[$(ts)] tick hit 529 overload; transient pause 60s until $pause_until"
+    # Skip the 429-provider-marking block below; continue to next iteration.
+    # (The paused_until just set will make the top-of-loop sleep skip this
+    # iteration's tick.)
+    continue
+  fi
+
   # If the tick itself hit a rate limit, the in-tick throttle-detection logic
   # never ran (the tick died before it could write state). Do it here in the
   # loop so the NEXT iteration picks a different provider.

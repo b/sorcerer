@@ -51,6 +51,8 @@ jq -r '
       "Rebase cycle \(.cycle) done on \(.issue_key); re-queueing for review"
     elif $e == "wizard-throttled" then
       "Throttled (\(.mode) \(short(.id))): retry after \(.retry_after)"
+    elif $e == "wizard-overloaded" then
+      "Overloaded 529 (\(.mode) \(short(.id))): retry after \(.retry_after)\(if .overload_count then " (strike #\(.overload_count))" else "" end)"
     elif $e == "wizard-resumed" then
       "Resumed (\(.mode) \(short(.id))) after throttle #\(.throttle_count)"
     elif $e == "provider-throttled" then
