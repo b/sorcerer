@@ -7,12 +7,15 @@
 # Usage: scripts/spawn-wizard.sh <mode> [options]
 #
 # Modes:
-#   noop       — minimal wizard for spawn-machinery testing. No side effects.
-#   architect  — Tier-1 architect (requires --request-file)
-#   design     — Tier-2 designer (requires --architect-plan-file and --sub-epic-index)
-#   implement  — Tier-3 issue implementation (requires --issue-meta-file)
-#   feedback   — refer-back addressing (requires --issue-meta-file with pr_urls + refer_back_cycle)
-#   rebase     — merge-conflict / branch-behind resolution (requires --issue-meta-file with pr_urls + conflict_cycle)
+#   noop              — minimal wizard for spawn-machinery testing. No side effects.
+#   architect         — Tier-1 architect (requires --request-file)
+#   architect-review  — reviews + edits an architect's plan.json/design.md (requires --subject-state-dir)
+#   design            — Tier-2 designer (requires --architect-plan-file and --sub-epic-index)
+#   design-review     — reviews + edits a designer's manifest.json/Linear issues (requires --subject-state-dir,
+#                       --architect-plan-file, --sub-epic-name)
+#   implement         — Tier-3 issue implementation (requires --issue-meta-file)
+#   feedback          — refer-back addressing (requires --issue-meta-file with pr_urls + refer_back_cycle)
+#   rebase            — merge-conflict / branch-behind resolution (requires --issue-meta-file with pr_urls + conflict_cycle)
 #
 # Flags:
 #   --request-file <path>            request markdown (required for architect)
@@ -47,9 +50,9 @@ fi
 MODE="${1:-}"
 shift || true
 case "$MODE" in
-  noop|architect|design|implement|feedback|rebase) ;;
+  noop|architect|architect-review|design|design-review|implement|feedback|rebase) ;;
   *) echo "Usage: $0 <mode> [options]" >&2
-     echo "Modes: noop, architect, design, implement, feedback, rebase" >&2
+     echo "Modes: noop, architect, architect-review, design, design-review, implement, feedback, rebase" >&2
      exit 2 ;;
 esac
 
@@ -60,6 +63,9 @@ PROVIDER_OVERRIDE=""
 WIZARD_ID_OVERRIDE=""
 ARCHITECT_PLAN_FILE=""
 SUB_EPIC_INDEX=""
+SUB_EPIC_NAME=""
+SUBJECT_STATE_DIR=""
+SUBJECT_ID=""
 ISSUE_META_FILE=""
 STATE_DIR_OVERRIDE=""
 while [[ $# -gt 0 ]]; do
@@ -85,6 +91,15 @@ while [[ $# -gt 0 ]]; do
     --sub-epic-index)
       [[ $# -ge 2 ]] || { echo "ERROR: --sub-epic-index requires a value" >&2; exit 2; }
       SUB_EPIC_INDEX="$2"; shift 2 ;;
+    --sub-epic-name)
+      [[ $# -ge 2 ]] || { echo "ERROR: --sub-epic-name requires a value" >&2; exit 2; }
+      SUB_EPIC_NAME="$2"; shift 2 ;;
+    --subject-state-dir)
+      [[ $# -ge 2 ]] || { echo "ERROR: --subject-state-dir requires a value" >&2; exit 2; }
+      SUBJECT_STATE_DIR="$2"; shift 2 ;;
+    --subject-id)
+      [[ $# -ge 2 ]] || { echo "ERROR: --subject-id requires a value" >&2; exit 2; }
+      SUBJECT_ID="$2"; shift 2 ;;
     --issue-meta-file)
       [[ $# -ge 2 ]] || { echo "ERROR: --issue-meta-file requires a value" >&2; exit 2; }
       ISSUE_META_FILE="$2"; shift 2 ;;
@@ -104,6 +119,23 @@ if [[ "$MODE" == "design" ]]; then
   [[ -n "$ARCHITECT_PLAN_FILE" ]] || { echo "ERROR: design mode requires --architect-plan-file <path>" >&2; exit 2; }
   [[ -f "$ARCHITECT_PLAN_FILE" ]] || { echo "ERROR: architect plan file not found: $ARCHITECT_PLAN_FILE" >&2; exit 2; }
   [[ -n "$SUB_EPIC_INDEX" ]] || { echo "ERROR: design mode requires --sub-epic-index <int>" >&2; exit 2; }
+fi
+
+if [[ "$MODE" == "architect-review" ]]; then
+  [[ -n "$SUBJECT_STATE_DIR" ]] || { echo "ERROR: architect-review mode requires --subject-state-dir <path>" >&2; exit 2; }
+  [[ -d "$SUBJECT_STATE_DIR" ]] || { echo "ERROR: subject state dir not found: $SUBJECT_STATE_DIR" >&2; exit 2; }
+  [[ -f "$SUBJECT_STATE_DIR/plan.json" ]] || { echo "ERROR: subject is missing plan.json: $SUBJECT_STATE_DIR" >&2; exit 2; }
+  [[ -n "$SUBJECT_ID" ]] || { echo "ERROR: architect-review mode requires --subject-id <uuid>" >&2; exit 2; }
+fi
+
+if [[ "$MODE" == "design-review" ]]; then
+  [[ -n "$SUBJECT_STATE_DIR" ]] || { echo "ERROR: design-review mode requires --subject-state-dir <path>" >&2; exit 2; }
+  [[ -d "$SUBJECT_STATE_DIR" ]] || { echo "ERROR: subject state dir not found: $SUBJECT_STATE_DIR" >&2; exit 2; }
+  [[ -f "$SUBJECT_STATE_DIR/manifest.json" ]] || { echo "ERROR: subject is missing manifest.json: $SUBJECT_STATE_DIR" >&2; exit 2; }
+  [[ -n "$ARCHITECT_PLAN_FILE" ]] || { echo "ERROR: design-review mode requires --architect-plan-file <path>" >&2; exit 2; }
+  [[ -f "$ARCHITECT_PLAN_FILE" ]] || { echo "ERROR: architect plan file not found: $ARCHITECT_PLAN_FILE" >&2; exit 2; }
+  [[ -n "$SUB_EPIC_NAME" ]] || { echo "ERROR: design-review mode requires --sub-epic-name <string>" >&2; exit 2; }
+  [[ -n "$SUBJECT_ID" ]] || { echo "ERROR: design-review mode requires --subject-id <uuid>" >&2; exit 2; }
 fi
 
 if [[ "$MODE" == "implement" || "$MODE" == "feedback" || "$MODE" == "rebase" ]]; then
@@ -295,6 +327,57 @@ case "$MODE" in
       > "$CONTEXT_FILE"
     ;;
 
+  architect-review)
+    SUBJECT_STATE_DIR_ABS="$(cd "$SUBJECT_STATE_DIR" && pwd)"
+    MAX_REFER=$(jq '.limits.max_refer_back_cycles // 5' "$CONFIG" 2>/dev/null || echo 5)
+    jq -n \
+      --arg wizard_id "$WIZARD_ID" \
+      --arg mode "$MODE" \
+      --arg heartbeat_file "$HEARTBEAT_FILE" \
+      --arg escalation_log "$ESCALATION_LOG" \
+      --arg state_dir "$STATE_DIR" \
+      --arg subject_id "$SUBJECT_ID" \
+      --arg subject_state_dir "$SUBJECT_STATE_DIR_ABS" \
+      --argjson max_refer_back_cycles "$MAX_REFER" \
+      --slurpfile cfg "$CONFIG" \
+      '{
+        wizard_id:$wizard_id, mode:$mode,
+        heartbeat_file:$heartbeat_file, escalation_log:$escalation_log,
+        state_dir:$state_dir, max_refer_back_cycles:$max_refer_back_cycles,
+        subject_id:$subject_id, subject_state_dir:$subject_state_dir,
+        repos:            ($cfg[0].repos            // []),
+        explorable_repos: ($cfg[0].explorable_repos // [])
+      }' \
+      > "$CONTEXT_FILE"
+    ;;
+
+  design-review)
+    SUBJECT_STATE_DIR_ABS="$(cd "$SUBJECT_STATE_DIR" && pwd)"
+    MAX_REFER=$(jq '.limits.max_refer_back_cycles // 5' "$CONFIG" 2>/dev/null || echo 5)
+    jq -n \
+      --arg wizard_id "$WIZARD_ID" \
+      --arg mode "$MODE" \
+      --arg heartbeat_file "$HEARTBEAT_FILE" \
+      --arg escalation_log "$ESCALATION_LOG" \
+      --arg state_dir "$STATE_DIR" \
+      --arg subject_id "$SUBJECT_ID" \
+      --arg subject_state_dir "$SUBJECT_STATE_DIR_ABS" \
+      --arg architect_plan_file "$ARCHITECT_PLAN_FILE_ABS" \
+      --arg sub_epic_name "$SUB_EPIC_NAME" \
+      --argjson max_refer_back_cycles "$MAX_REFER" \
+      --slurpfile cfg "$CONFIG" \
+      '{
+        wizard_id:$wizard_id, mode:$mode,
+        heartbeat_file:$heartbeat_file, escalation_log:$escalation_log,
+        state_dir:$state_dir, max_refer_back_cycles:$max_refer_back_cycles,
+        subject_id:$subject_id, subject_state_dir:$subject_state_dir,
+        architect_plan_file:$architect_plan_file,
+        sub_epic_name:$sub_epic_name,
+        repos: ($cfg[0].repos // [])
+      }' \
+      > "$CONTEXT_FILE"
+    ;;
+
   rebase)
     REQUIRED='["issue_linear_id","issue_key","branch_name","default_branch","repos","worktree_paths","pr_urls","conflict_cycle"]'
     missing=$(jq -r --argjson req "$REQUIRED" '$req - (keys) | join(", ")' "$ISSUE_META_FILE_ABS")
@@ -341,12 +424,14 @@ if [[ "$MODE" == "architect" || "$MODE" == "design" ]]; then
 fi
 
 case "$MODE" in
-  noop)      PROMPT_FILE="$SORCERER_REPO/prompts/wizard-noop.md" ;;
-  architect) PROMPT_FILE="$SORCERER_REPO/prompts/architect.md" ;;
-  design)    PROMPT_FILE="$SORCERER_REPO/prompts/wizard-design.md" ;;
-  implement) PROMPT_FILE="$SORCERER_REPO/prompts/wizard-implement.md" ;;
-  feedback)  PROMPT_FILE="$SORCERER_REPO/prompts/wizard-feedback.md" ;;
-  rebase)    PROMPT_FILE="$SORCERER_REPO/prompts/wizard-rebase.md" ;;
+  noop)             PROMPT_FILE="$SORCERER_REPO/prompts/wizard-noop.md" ;;
+  architect)        PROMPT_FILE="$SORCERER_REPO/prompts/architect.md" ;;
+  architect-review) PROMPT_FILE="$SORCERER_REPO/prompts/wizard-architect-review.md" ;;
+  design)           PROMPT_FILE="$SORCERER_REPO/prompts/wizard-design.md" ;;
+  design-review)    PROMPT_FILE="$SORCERER_REPO/prompts/wizard-design-review.md" ;;
+  implement)        PROMPT_FILE="$SORCERER_REPO/prompts/wizard-implement.md" ;;
+  feedback)         PROMPT_FILE="$SORCERER_REPO/prompts/wizard-feedback.md" ;;
+  rebase)           PROMPT_FILE="$SORCERER_REPO/prompts/wizard-rebase.md" ;;
 esac
 [[ -f "$PROMPT_FILE" ]] || { echo "ERROR: missing prompt file $PROMPT_FILE" >&2; exit 1; }
 
@@ -354,15 +439,19 @@ LOG_FILE="$STATE_DIR/logs/spawn.txt"
 
 # Resolve per-role defaults from config.json when the caller didn't pass
 # --model / --effort explicitly. Role mapping:
-#   architect mode              → config.{models,effort}.architect
-#   design mode                 → config.{models,effort}.designer
+#   architect              → config.{models,effort}.architect
+#   architect-review       → config.{models,effort}.reviewer_architect
+#   design                 → config.{models,effort}.designer
+#   design-review          → config.{models,effort}.reviewer_design
 #   implement / feedback / rebase → config.{models,effort}.executor
-#   noop                        → no role; claude defaults
+#   noop                   → no role; claude defaults
 case "$MODE" in
-  architect)                  ROLE_KEY="architect" ;;
-  design)                     ROLE_KEY="designer"  ;;
-  implement|feedback|rebase)  ROLE_KEY="executor"  ;;
-  *)                          ROLE_KEY=""          ;;
+  architect)                  ROLE_KEY="architect"          ;;
+  architect-review)           ROLE_KEY="reviewer_architect" ;;
+  design)                     ROLE_KEY="designer"           ;;
+  design-review)              ROLE_KEY="reviewer_design"    ;;
+  implement|feedback|rebase)  ROLE_KEY="executor"           ;;
+  *)                          ROLE_KEY=""                   ;;
 esac
 
 # Pick the active provider and export its env. A --provider flag overrides

@@ -26,6 +26,14 @@ jq -r '
       "Designer spawned for sub-epic '\''\(.sub_epic)'\'' (id: \(short(.id)))"
     elif $e == "designer-completed" then
       "Designer completed: Linear epic \(short(.epic_linear_id)), \(.issues) issue(s)"
+    elif $e == "architect-review-spawned" then
+      "Architect-review spawned for \(short(.subject_id)) (reviewer: \(short(.id)))"
+    elif $e == "architect-review-completed" then
+      "Architect-review completed for \(short(.subject_id)): \(.decision)\(if .edits then " (\(.edits) edit(s))" else "" end)"
+    elif $e == "design-review-spawned" then
+      "Design-review spawned for designer \(short(.subject_id)) (reviewer: \(short(.id)))"
+    elif $e == "design-review-completed" then
+      "Design-review completed for designer \(short(.subject_id)): \(.decision)\(if .edits then " (\(.edits) edit(s))" else "" end)"
     elif $e == "implement-spawned" then
       "Implement wizard spawned on \(.issue_key) (pid \(.pid))"
     elif $e == "implement-completed" then

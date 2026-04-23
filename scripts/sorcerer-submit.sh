@@ -135,7 +135,10 @@ case "$ARG" in
       jq -r '
         def nonterm: (. == "pending-architect" or . == "running"
                    or . == "throttled"
-                   or . == "awaiting-tier-2"   or . == "awaiting-tier-3"
+                   or . == "awaiting-architect-review" or . == "architect-review-running"
+                   or . == "awaiting-tier-2"
+                   or . == "awaiting-design-review"    or . == "design-review-running"
+                   or . == "awaiting-tier-3"
                    or . == "pending-design"    or . == "awaiting-review"
                    or . == "merging");
         def fmt_a: "  architect \(.id[0:8]) [\(.status)\(if .retry_after then " until \(.retry_after)" else "" end)] — \(.request_file // "?")";
