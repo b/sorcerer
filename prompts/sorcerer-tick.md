@@ -946,20 +946,22 @@ mtime=$(stat -c %Y .sorcerer/architects/<id>/heartbeat 2>/dev/null)
 ```
 
 - If `mtime` is empty (file missing): step 5a already classified it; skip here.
-- If `now - mtime > 300` (5 minutes): stale.
-  - `respawn_count == 0`: increment, re-spawn:
-    ```bash
-    nohup bash scripts/spawn-wizard.sh architect \
-      --wizard-id <id> \
-      --request-file .sorcerer/architects/<id>/request.md \
-      > .sorcerer/architects/<id>/logs/spawn.txt 2>&1 &
-    echo $!
-    ```
-    Capture new pid. Append:
-    ```json
-    {"ts":"...","event":"architect-stale-respawn","id":"<id>","new_pid":12345}
-    ```
-  - `respawn_count >= 1`: `status: failed`. Append to `.sorcerer/escalations.log` with `rule: stale-heartbeat-second-failure`.
+- If `now - mtime > 300` (5 minutes): heartbeat is stale. **Consult pid liveness (`is_pid_alive`) before deciding**:
+  - **Pid is ALIVE** — the architect is still running but hasn't touched heartbeat recently. This is usually a long repo survey or a long MCP call, not a stuck process. Do NOT respawn and do NOT touch `respawn_count`. Log `tick: architect <id> heartbeat stale <age>s but pid alive; trusting busy wizard (max-age enforces the eventual cap)` and move on. Slice-37's max-age gate bounds the wait at the configured wall-clock ceiling.
+  - **Pid is DEAD** — heartbeat stale AND process gone is a real crash. Follow the respawn-or-fail ladder:
+    - `respawn_count == 0`: increment, re-spawn:
+      ```bash
+      nohup bash scripts/spawn-wizard.sh architect \
+        --wizard-id <id> \
+        --request-file .sorcerer/architects/<id>/request.md \
+        > .sorcerer/architects/<id>/logs/spawn.txt 2>&1 &
+      echo $!
+      ```
+      Capture new pid. Append:
+      ```json
+      {"ts":"...","event":"architect-stale-respawn","id":"<id>","new_pid":12345}
+      ```
+    - `respawn_count >= 1`: `status: failed`. Append to `.sorcerer/escalations.log` with `rule: stale-heartbeat-second-failure`.
 
 #### 11b. Designer wizards
 
@@ -972,18 +974,20 @@ mtime=$(stat -c %Y .sorcerer/wizards/<id>/heartbeat 2>/dev/null)
 ```
 
 - If `mtime` is empty (file missing): step 5b already classified it; skip here.
-- If `now - mtime > 300` (5 minutes): stale.
-  - `respawn_count == 0`: increment, re-spawn:
-    ```bash
-    nohup bash scripts/spawn-wizard.sh design \
-      --wizard-id <id> \
-      --architect-plan-file .sorcerer/architects/<architect_id>/plan.json \
-      --sub-epic-index <sub_epic_index> \
-      > .sorcerer/wizards/<id>/logs/spawn.txt 2>&1 &
-    echo $!
-    ```
-    Capture new pid. Append `designer-stale-respawn` event.
-  - `respawn_count >= 1`: `status: failed`. Append to `.sorcerer/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: design`.
+- If `now - mtime > 300` (5 minutes): heartbeat is stale. **Consult pid liveness (`is_pid_alive`) before deciding**:
+  - **Pid is ALIVE** — designer is still running (long explorable-repo survey or long Linear MCP sequence is common here). Do NOT respawn, do NOT touch `respawn_count`. Log `tick: designer <id> heartbeat stale <age>s but pid alive; trusting busy wizard`. Max-age bounds the wait.
+  - **Pid is DEAD** — stale AND gone:
+    - `respawn_count == 0`: increment, re-spawn:
+      ```bash
+      nohup bash scripts/spawn-wizard.sh design \
+        --wizard-id <id> \
+        --architect-plan-file .sorcerer/architects/<architect_id>/plan.json \
+        --sub-epic-index <sub_epic_index> \
+        > .sorcerer/wizards/<id>/logs/spawn.txt 2>&1 &
+      echo $!
+      ```
+      Capture new pid. Append `designer-stale-respawn` event.
+    - `respawn_count >= 1`: `status: failed`. Append to `.sorcerer/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: design`.
 
 #### 11b-r. Review wizards (architect-review, design-review)
 
@@ -996,9 +1000,11 @@ mtime=$(stat -c %Y .sorcerer/wizards/<id>/heartbeat 2>/dev/null)
 ```
 
 - If `mtime` is empty: step 5d / 5e handles it. Skip.
-- If `now - mtime > 300` (5 minutes): stale.
-  - `respawn_count == 0`: increment, re-spawn with the same flags the original spawn used. Capture new pid. Append `<mode>-stale-respawn` event.
-  - `respawn_count >= 1`: `status: failed`, AND mark the parent (architect or designer) `status: failed`. Append to `.sorcerer/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: <architect-review|design-review>`. Clear the parent's `review_wizard_id`.
+- If `now - mtime > 300` (5 minutes): heartbeat is stale. **Consult pid liveness (`is_pid_alive`) before deciding**:
+  - **Pid is ALIVE** — reviewer is still running (fetching Linear issues + reading manifests can take minutes on a large epic). Do NOT respawn, do NOT touch `respawn_count`. Log `tick: <mode> <id> heartbeat stale <age>s but pid alive; trusting busy reviewer`. Max-age bounds the wait.
+  - **Pid is DEAD** — stale AND gone:
+    - `respawn_count == 0`: increment, re-spawn with the same flags the original spawn used. Capture new pid. Append `<mode>-stale-respawn` event.
+    - `respawn_count >= 1`: `status: failed`, AND mark the parent (architect or designer) `status: failed`. Append to `.sorcerer/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: <architect-review|design-review>`. Clear the parent's `review_wizard_id`.
 
 #### 11c. Implement wizards
 
@@ -1011,19 +1017,21 @@ mtime=$(stat -c %Y <state_dir>/heartbeat 2>/dev/null)
 ```
 
 - If `mtime` is empty: step 5c handles it. Skip.
-- If `now - mtime > 300`: stale.
-  - **PR-set recovery check (run before respawn).** Call `discover_pr_set <branch_name> <repos…>` (see "PR-set recovery" above). If it returns a complete pr_urls map, the wizard effectively finished its work — the stale heartbeat just means it died during cleanup. Write `pr_urls.json`, set `status: awaiting-review`, set the entry's `pr_urls` to the discovered map, append `pr-set-recovered` with `source: "step11c"`. Do NOT respawn, do NOT increment `respawn_count`.
-  - Only if recovery found no PR set: proceed with the respawn-or-fail path below.
-  - `respawn_count == 0`: increment, re-spawn:
-    ```bash
-    nohup bash scripts/spawn-wizard.sh implement \
-      --wizard-id <id> \
-      --issue-meta-file <state_dir>/meta.json \
-      > <state_dir>/logs/spawn.txt 2>&1 &
-    echo $!
-    ```
-    Capture new pid. Append `implement-stale-respawn` event.
-  - `respawn_count >= 1`: `status: failed`. Append to `.sorcerer/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: implement`, `issue_key: <SOR-N>`.
+- If `now - mtime > 300`: heartbeat is stale. **Consult pid liveness (`is_pid_alive`) before deciding**:
+  - **Pid is ALIVE** — the implement wizard is still running. Cargo builds, test suites, Sylvan FFI compilations, and long Phase-2 repo exploration can all occupy the claude subprocess for >5 min without heartbeat touches. Do NOT respawn, do NOT touch `respawn_count`, do NOT kill. Log `tick: implement <id>/<issue_key> heartbeat stale <age>s but pid alive; trusting busy wizard`. Slice-37's max-age gate bounds the wait at the configured wall-clock ceiling.
+  - **Pid is DEAD** — stale AND gone, a real crash:
+    - **PR-set recovery check (run before respawn).** Call `discover_pr_set <branch_name> <repos…>` (see "PR-set recovery" above). If it returns a complete pr_urls map, the wizard effectively finished its work — the stale heartbeat just means it died during cleanup. Write `pr_urls.json`, set `status: awaiting-review`, set the entry's `pr_urls` to the discovered map, append `pr-set-recovered` with `source: "step11c"`. Do NOT respawn, do NOT increment `respawn_count`.
+    - Only if recovery found no PR set: proceed with the respawn-or-fail path below.
+    - `respawn_count == 0`: increment, re-spawn:
+      ```bash
+      nohup bash scripts/spawn-wizard.sh implement \
+        --wizard-id <id> \
+        --issue-meta-file <state_dir>/meta.json \
+        > <state_dir>/logs/spawn.txt 2>&1 &
+      echo $!
+      ```
+      Capture new pid. Append `implement-stale-respawn` event.
+    - `respawn_count >= 1`: `status: failed`. Append to `.sorcerer/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: implement`, `issue_key: <SOR-N>`.
 
 ### Step 12 — PR-set review and merge
 
