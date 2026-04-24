@@ -99,7 +99,7 @@ For EACH repo (in `merge_order` if declared, else any order):
 1. Touch heartbeat.
 2. `cd <worktree_paths[repo]>`.
 3. Stage files explicitly by name (do NOT `git add -A` — risks committing secrets or build artifacts).
-4. `git commit -m "<message>"` with a clear message ending with a `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` line.
+4. `git commit -m "<message>"` with a clear message. Do NOT add Co-Authored-By, "Generated with Claude Code," or any other automated-attribution trailer — sorcerer does not sign commits on the user's behalf.
 5. `git push -u origin <branch_name>` (first push) or `git push` (subsequent).
 6. `gh pr create --title "<title>" --body "$(cat <<'EOF'
    ## Summary
@@ -110,10 +110,8 @@ For EACH repo (in `merge_order` if declared, else any order):
 
    ## Test plan
    - [ ] <bulleted markdown checklist>
-
-   🤖 Generated with [Claude Code](https://claude.com/claude-code)
    EOF
-   )"` — capture the PR URL.
+   )"` — capture the PR URL. Do NOT add "Generated with Claude Code" or any other automated-attribution footer to the PR body.
 7. Resolve any automated bot findings on the PR per the /wizard skill's Phase 8 cycle: every finding gets a fix commit OR a false-positive reply. Iterate until the bot status is clean.
 
 ### Phase 9 — Hand off to coordinator
