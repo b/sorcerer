@@ -1034,19 +1034,25 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
    gh pr view "<pr_url>" --json state,mergeable,mergeStateStatus,statusCheckRollup,reviews,comments,files,body,additions,deletions
    ```
 
-2. **Defer if any PR is not yet ready for review.** A PR is "ready" when `state == "OPEN"` and either:
-   - `statusCheckRollup` is empty (no required checks configured), OR
-   - all required checks have completed (any state — we'll judge on it next).
+2. **Defer if any PR is not yet ready for review.** A PR is "ready" when ALL of the following are true:
+   - `state == "OPEN"` (not draft, not already merged/closed)
+   - `statusCheckRollup` is **non-empty** AND every check in it has a **terminal conclusion** — one of `SUCCESS | FAILURE | ERROR | CANCELLED | SKIPPED | NEUTRAL | TIMED_OUT | ACTION_REQUIRED | STALE`. Non-terminal states that force a defer: `PENDING | QUEUED | IN_PROGRESS | WAITING`.
 
-   If any PR is still draft or has pending checks: skip this wizard for this tick (next tick will re-check). Log `tick: deferring review of <issue_key> — PR(s) not ready`.
+   **Empty `statusCheckRollup`** is NOT a green light. It means either:
+   - CI just hasn't started yet (race: PR opened seconds ago, checks haven't queued). → Defer this tick; next tick will see them.
+   - The target repo has no CI at all. → Suspicious. After 10 min of an empty rollup, escalate with `rule: no-ci-checks-found` (the user needs to decide: is this repo actually no-CI and safe to merge blind, or is the App missing the Checks permission, or is CI broken?). DO NOT merge blindly in either case.
 
-3. **Merge-readiness gate (new — pre-empts the other gates when it fails).** If ANY PR in the set has `mergeable == "CONFLICTING"` or `mergeStateStatus` in `["BEHIND", "DIRTY"]`:
+   Use `gh pr checks <pr_url>` in addition to the JSON view — it prints human-readable state per check and is the easier signal for "anything unfinished?".
+
+   If any PR is draft or has non-terminal checks: skip this wizard for this tick. Log `tick: deferring review of <issue_key> — PR(s) not ready (<reason>)`.
+
+3. **Merge-readiness gate (pre-empts the other gates when it fails).** If ANY PR in the set has `mergeable == "CONFLICTING"` or `mergeStateStatus` in `["BEHIND", "DIRTY"]`:
    - This is a rebase situation, not a review situation. Proceed to step 6c (rebase path) — do NOT run CI/bot/LLM gates against a branch that's behind main, it'll just produce noise.
    - Exception: if the wizard's `conflict_cycle >= max_refer_back_cycles` (reusing the same cap), skip the rebase path and escalate with `rule: conflict-cap-reached`. The default cap is 5 rebase attempts.
 
-4. **CI gate.** Are all required checks green on every PR? If any required check failed: this is a refer-back trigger (full refer-back path is slice 10; for slice 9, escalate the wizard with `rule: ci-gate-failed-refer-back-not-yet-implemented`).
+4. **CI gate.** Every check in every PR's `statusCheckRollup` must have `conclusion == "SUCCESS"` (or `SKIPPED` for checks the repo considers optional — treat `SKIPPED` as passing). If ANY check has `conclusion` in `["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STALE"]`: **route to refer-back (step 6b)**, not escalate. The wizard's feedback session fixes the failing check. The concerns list in the refer-back comment must enumerate the specific failing checks by name + which PR they're on.
 
-5. **Bot gate.** Scan PR comments for unresolved automated-reviewer findings. Heuristic: look for comments from known bot accounts (e.g. `coderabbitai`, `bug-bot`, `dependabot`) where the most recent comment from that bot is not addressed (no follow-up commit since). If any open finding: escalate with `rule: bot-gate-failed-refer-back-not-yet-implemented`. (Slice 9 only handles the all-clean path; slice 10 adds refer-back.)
+5. **Bot gate.** Scan PR comments for unresolved automated-reviewer findings. Heuristic: look for comments from known bot accounts (e.g. `coderabbitai`, `bug-bot`, `dependabot`) where the most recent comment from that bot is not addressed (no follow-up commit since). If any open finding: **route to refer-back (step 6b)**. The concerns list enumerates each bot finding with repo + file/line + what the bot said.
 
 6. **LLM gate (you, the tick LLM, do this inline).** Fetch the Linear issue: `mcp__plugin_linear_linear__get_issue` with `id=<issue_linear_id>`. Read its description carefully, especially the **Acceptance criteria** section. Then read the PR diffs (from each PR's `files` field, which includes patches). Judge:
    - Do the changes satisfy every acceptance criterion?
@@ -1059,13 +1065,26 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
    - **escalate** — high-severity security finding, or anything sorcerer cannot autonomously resolve. Update entry to `status: blocked`, append to `.sorcerer/escalations.log` with `rule: review-escalation` and a description. Also escalate if `refer_back_cycle >= max_refer_back_cycles` (hard cap from `config.json:limits.max_refer_back_cycles`, default 5). Note: `CONFLICTING` / `BEHIND` no longer escalates — step 3 routes those to 6c (rebase) first.
 
 6a. **Merge action** (only when decision == merge):
-   - For each PR (in `merge_order` if declared, else any order): `gh pr merge <pr_url> --auto --squash --delete-branch`. With auto-merge, the PR merges as soon as conditions are met (no required checks → immediately).
+   - **Pre-merge re-verification (mandatory, belt-and-suspenders).** The decision was made on data fetched at the top of step 12; a check could have flipped red in the meantime. For each PR in the set, re-fetch and confirm ALL of:
+     - `state == "OPEN"` (someone didn't close/merge it externally)
+     - `mergeable == "MERGEABLE"` (not CONFLICTING)
+     - `mergeStateStatus == "CLEAN"` — no pending checks, no blocked state. Other values (`BEHIND`, `BLOCKED`, `DIRTY`, `DRAFT`, `UNSTABLE`, `HAS_HOOKS`) are all "not safe to merge right now" for different reasons.
+     - Every `statusCheckRollup` entry has `conclusion == "SUCCESS"` or `SKIPPED`.
+
+     If any PR fails re-verification: do NOT merge. Log `tick: PR <url> failed pre-merge re-verification (<reason>); deferring`. Leave the wizard at `awaiting-review`; next tick re-evaluates from scratch.
+
+   - **Synchronous merge (NOT --auto).** `--auto` hands off to GitHub's branch-protection rules; if those aren't configured correctly on the target repo, `--auto` merges immediately regardless of check state. We've done the gating ourselves; use synchronous merge so any failure is visible in this tick:
+     ```bash
+     gh pr merge "<pr_url>" --squash --delete-branch
+     ```
+     For each PR (in `merge_order` if declared, else any order). If `gh pr merge` fails for any reason (branch protection rejects, checks flipped red between re-verify and merge, network blip): log the failure, do NOT continue merging subsequent PRs in the set (partial-merge state is the worst outcome), and leave the wizard at `awaiting-review`. Append an escalation with `rule: merge-rejected-after-gates` including the gh error. Next tick re-evaluates.
+
    - Update entry: `status: merging`, `review_decision: merge`.
    - Append to `.sorcerer/events.log`:
      ```json
      {"ts":"...","event":"review-merge","id":"<wizard-id>","issue_key":"<SOR-N>","pr_count":<N>}
      ```
-   - Print to **stdout**: `Reviewed and queued for merge: <issue_key> (<N> PR(s)).`
+   - Print to **stdout**: `Reviewed and merged: <issue_key> (<N> PR(s)).`
 
 6b. **Refer-back action** (only when decision == refer-back):
    - Increment `refer_back_cycle` on the entry (initialize to 0 if absent, so first refer-back sets it to 1).
