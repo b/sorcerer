@@ -57,11 +57,17 @@ trap 'echo "[$(ts)] coordinator-loop received SIGINT" >&2; exit 130' INT
 
 has_in_flight_work() {
   # See docs/lifecycle.md for the status taxonomy. The loop keeps running as
-  # long as any entry is in a non-terminal state.
+  # long as any entry is in a non-terminal state, OR any designer manifest
+  # still has un-landed issues.
   if compgen -G ".sorcerer/requests/*.md" > /dev/null 2>&1; then
     return 0
   fi
-  if [[ -f .sorcerer/sorcerer.json ]] && jq -e '
+  if [[ ! -f .sorcerer/sorcerer.json ]]; then
+    return 1
+  fi
+
+  # Primary signal: any architect or wizard entry in a non-terminal state.
+  if jq -e '
       def entries: (.active_architects // []) + (.active_wizards // []);
       [entries[].status] | any(
         . == "pending-architect"           or
@@ -79,6 +85,37 @@ has_in_flight_work() {
       )' .sorcerer/sorcerer.json > /dev/null 2>&1; then
     return 0
   fi
+
+  # Defensive manifest check. With slice-40's completion rule, a designer
+  # should only be `completed` when every manifest issue has merged/archived.
+  # But stale state files from before slice 40, or operator intervention,
+  # can leave a `completed` designer with un-landed issues. In that case
+  # treat the work as in-flight so step 8 gets a chance to re-dispatch.
+  mapfile -t manifests < <(jq -r '
+    (.active_wizards // [])[]
+    | select(.mode == "design" and .status == "completed")
+    | .manifest_file // empty
+  ' .sorcerer/sorcerer.json 2>/dev/null)
+  for mf in "${manifests[@]}"; do
+    [[ -z "$mf" || ! -f "$mf" ]] && continue
+    mapfile -t manifest_ids < <(jq -r '(.issues // [])[].linear_id // empty' "$mf" 2>/dev/null)
+    [[ ${#manifest_ids[@]} -eq 0 ]] && continue
+    for id in "${manifest_ids[@]}"; do
+      [[ -z "$id" ]] && continue
+      landed=$(jq -r --arg id "$id" '
+        [(.active_wizards // [])[]
+         | select(.mode == "implement"
+                  and .issue_linear_id == $id
+                  and (.status == "merged" or .status == "archived"))]
+        | length
+      ' .sorcerer/sorcerer.json 2>/dev/null || echo 0)
+      if [[ "$landed" == "0" ]]; then
+        echo "[$(ts)] has_in_flight_work: designer manifest $mf has un-landed issue $id (defensive check)" >&2
+        return 0
+      fi
+    done
+  done
+
   return 1
 }
 

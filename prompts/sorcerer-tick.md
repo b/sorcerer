@@ -790,7 +790,7 @@ For each `active_architects` entry with `status: awaiting-tier-2`:
          ```
        - Increment running-count (for concurrency check on the next sub-epic in this loop).
 
-5. Once ALL sub-epics for an architect have been evaluated, transition the architect's `status` from `awaiting-tier-2` to `completed` ONLY if every sub-epic now has a corresponding `active_wizards` entry. If any were deferred for concurrency OR unsatisfied cross-epic deps, leave the architect at `awaiting-tier-2` for the next tick to re-evaluate.
+5. Once ALL sub-epics for an architect have been evaluated, transition the architect's `status` from `awaiting-tier-2` to `completed` ONLY if every sub-epic's designer entry is in status `completed` or `archived` — i.e. the downstream work has actually finished, not merely been dispatched. Leaving at `awaiting-tier-2` while ANY designer is still running, throttled, awaiting-tier-3, failed, or blocked keeps the architect in scope of the tick: if the operator later strips or retries a failed designer, `has_in_flight_work` stays true and step 6 reconsiders. Only a fully-merged set of sub-epics marks the architect done.
 
 ### Step 7 — Poll Linear (stub for slice 8)
 
@@ -920,7 +920,7 @@ Append event:
 {"ts":"...","event":"implement-spawned","id":"<implement-uuid>","issue_key":"<SOR-N>","pid":12345}
 ```
 
-After processing all candidates for a designer, if every issue in its manifest has either a corresponding `running` or `awaiting-review` implement wizard, transition the designer's `status` from `awaiting-tier-3` to `completed`. Otherwise leave at `awaiting-tier-3` for the next tick.
+After processing all candidates for a designer, transition the designer's `status` from `awaiting-tier-3` to `completed` ONLY if every issue in its `manifest.json` has an implement wizard in status `merged` or `archived` — i.e. the work has actually landed, not merely been dispatched. A designer whose manifest has any issue in `running`, `throttled`, `awaiting-review`, `merging`, `failed`, or `blocked` state stays at `awaiting-tier-3`. That keeps the manifest in scope: if the operator strips a `failed` implement wizard to retry it, the next tick's step 8 sees the designer at `awaiting-tier-3`, no active implement entry for that issue, and re-schedules. The alternative rule ("complete on dispatch") fires the designer to `completed` prematurely, and a subsequently-stripped or failed implement slips through the coordinator's tick without being reconsidered.
 
 ### Step 11 — Heartbeat poll and throttle resume
 
