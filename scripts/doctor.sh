@@ -226,6 +226,18 @@ if [[ ${#REPO_INFO[@]} -gt 0 ]]; then
       protected=$(jq -r '.protected' <<<"$branch_info")
       if [[ "$protected" == "true" ]]; then
         ok "$repo_no_host: branch protection on $default_branch"
+        # Verify required status checks are actually configured. Without this,
+        # `gh pr merge --auto` merges the moment a PR opens, racing CI. Even
+        # though slice 38 moved sorcerer to synchronous merge with pre-merge
+        # re-verification, branch protection is the last-line defense and
+        # should exist for every target repo.
+        required_checks=$(jq -r '.required_status_checks.contexts // [] | length' <<<"$branch_info")
+        strict=$(jq -r '.required_status_checks.strict // false' <<<"$branch_info")
+        if [[ "$required_checks" -gt 0 ]]; then
+          ok "$repo_no_host: $required_checks required status check(s) configured; strict=$strict"
+        else
+          no "$repo_no_host: branch protection present but NO required status checks — PRs can merge with CI red or un-started. Settings → Branches → Rule → 'Require status checks to pass before merging' and pick the checks that must pass."
+        fi
       else
         no "$repo_no_host: $default_branch has NO branch protection (Settings → Branches → Add rule)"
       fi
