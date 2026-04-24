@@ -77,7 +77,7 @@ Read your context file at `$SORCERER_CONTEXT_FILE` (JSON). Required fields:
    git commit -m "address review concerns (cycle <N>)"
    git push
    ```
-   Commit message ends with a `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` line.
+   Do NOT add Co-Authored-By, "Generated with Claude Code," or any other automated-attribution trailer to commit messages.
 
 10. **Touch heartbeat.**
 
