@@ -86,11 +86,12 @@ has_in_flight_work() {
     return 0
   fi
 
-  # Defensive manifest check. With slice-40's completion rule, a designer
-  # should only be `completed` when every manifest issue has merged/archived.
-  # But stale state files from before slice 40, or operator intervention,
-  # can leave a `completed` designer with un-landed issues. In that case
-  # treat the work as in-flight so step 8 gets a chance to re-dispatch.
+  # Defensive manifest check (designer tier). With slice-40's completion rule,
+  # a designer should only be `completed` when every manifest issue has
+  # merged/archived. But stale state files from before slice 40, or operator
+  # intervention, can leave a `completed` designer with un-landed issues. In
+  # that case treat the work as in-flight so step 8 gets a chance to
+  # re-dispatch.
   mapfile -t manifests < <(jq -r '
     (.active_wizards // [])[]
     | select(.mode == "design" and .status == "completed")
@@ -111,6 +112,43 @@ has_in_flight_work() {
       ' .sorcerer/sorcerer.json 2>/dev/null || echo 0)
       if [[ "$landed" == "0" ]]; then
         echo "[$(ts)] has_in_flight_work: designer manifest $mf has un-landed issue $id (defensive check)" >&2
+        return 0
+      fi
+    done
+  done
+
+  # Defensive plan check (architect tier, symmetric to the designer check
+  # above). With slice-41's completion rule, an architect should only be
+  # `completed` when every sub-epic in plan.json has a completed/archived
+  # designer. Before the fix — or on stale state — the architect could have
+  # hit `completed` while a sub-epic sat un-spawned (cross-epic dep just
+  # resolved between ticks). If ANY sub-epic in the plan lacks a
+  # completed/archived designer entry, count as in-flight so step 6 gets to
+  # reconsider on the next tick.
+  mapfile -t plans < <(jq -r '
+    (.active_architects // [])[]
+    | select(.status == "completed")
+    | "\(.id)\t\(.plan_file // "")"
+  ' .sorcerer/sorcerer.json 2>/dev/null)
+  for line in "${plans[@]}"; do
+    [[ -z "$line" ]] && continue
+    arch_id="${line%%$'\t'*}"
+    plan_file="${line##*$'\t'}"
+    [[ -z "$plan_file" || ! -f "$plan_file" ]] && continue
+    mapfile -t sub_names < <(jq -r '(.sub_epics // [])[].name // empty' "$plan_file" 2>/dev/null)
+    [[ ${#sub_names[@]} -eq 0 ]] && continue
+    for name in "${sub_names[@]}"; do
+      [[ -z "$name" ]] && continue
+      done_count=$(jq -r --arg aid "$arch_id" --arg n "$name" '
+        [(.active_wizards // [])[]
+         | select(.mode == "design"
+                  and .architect_id == $aid
+                  and .sub_epic_name == $n
+                  and (.status == "completed" or .status == "archived"))]
+        | length
+      ' .sorcerer/sorcerer.json 2>/dev/null || echo 0)
+      if [[ "$done_count" == "0" ]]; then
+        echo "[$(ts)] has_in_flight_work: architect $arch_id plan $plan_file has sub-epic '$name' without a completed designer (defensive check)" >&2
         return 0
       fi
     done
