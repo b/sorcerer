@@ -63,7 +63,11 @@ case "$ARG" in
     echo "Pending requests (not yet picked up): $pending_count"
     if (( pending_count > 0 )); then
       while IFS= read -r f; do
-        first_line=$(head -1 "$f" 2>/dev/null | head -c 100)
+        # Single awk: take first line, truncate to 100 chars, print, exit. The
+        # previous `head -1 "$f" | head -c 100` would SIGPIPE head -1 for any
+        # request with a >100-byte first line — same root cause as the submit
+        # path SIGPIPE on ~40KB prompts.
+        first_line=$(awk 'NR==1{print substr($0, 1, 100); exit}' "$f" 2>/dev/null)
         printf "  - %s: %s\n" "$(basename "$f")" "$first_line"
       done < <(find "$STATE_DIR/requests" -maxdepth 1 -name '*.md' -type f 2>/dev/null | sort)
     fi
@@ -386,8 +390,14 @@ EOF
 fi
 
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
-FIRST_LINE="$(printf '%s' "$PROMPT" | head -1)"
-SLUG="$(printf '%s' "$FIRST_LINE" | head -c 80 | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | tr -s '-' | sed 's/^-//;s/-$//' | head -c 60 | sed 's/-$//')"
+# Pure-bash first-line extraction. The previous `printf '%s' "$PROMPT" | head -1`
+# would SIGPIPE printf for ~40KB+ prompts (head -1 closes the pipe after the
+# first line; printf still has tens of KB to write); under `set -euo pipefail`
+# that aborted the script before the request file was written.
+FIRST_LINE="${PROMPT%%$'\n'*}"
+# Slug from the first line. ${FIRST_LINE:0:80} caps length without a pipe; the
+# tr/sed chain operates on a small (<=80B) input so no SIGPIPE risk remains.
+SLUG="$(printf '%s' "${FIRST_LINE:0:80}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | tr -s '-' | sed 's/^-//;s/-$//' | head -c 60 | sed 's/-$//')"
 [[ -z "$SLUG" ]] && SLUG="request"
 FILE="$STATE/requests/${TS}-${SLUG}.md"
 printf '%s\n' "$PROMPT" > "$FILE"
