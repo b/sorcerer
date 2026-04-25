@@ -184,6 +184,13 @@ All of:
 - With `merge_order` declared: serial. Merge PR 1, wait for confirmation; merge PR 2; etc. `gh pr merge <url> --squash --delete-branch` each. On failure of step N, stop — leave 1..N-1 merged and escalate (partial-merge state needs a human).
 - Without `merge_order`: enable auto-merge on every PR simultaneously. `gh pr merge <url> --auto --squash --delete-branch`. GitHub's own queue decides timing.
 
+**Audit trail (post-merge).** Once the set has merged, the coordinator writes the per-criterion review verdict to three places so the merge decision is not opaque:
+1. A structured comment on the Linear issue (`✅ verified | ❌ not_verified | N/A`, one-line reason each).
+2. The Linear issue body itself: `- [ ]` lines for verified criteria are flipped to `- [x]`. `not_applicable` and `not_verified` lines are left unticked — the comment carries that nuance.
+3. A short pointer comment on each merged PR with the Linear issue URL — so a viewer of the GitHub PR can see review happened and follow the link.
+
+These writes are best-effort: the merge has already shipped, so a Linear/`gh` API blip logs but doesn't unwind anything. Per-criterion mechanics live in `prompts/sorcerer-tick.md` step 12.6a "Audit trail".
+
 Per-issue cleanup runs once the full set has merged.
 
 ### `refer-back`
