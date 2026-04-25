@@ -47,6 +47,8 @@ Walk these checks in order. For each defect found, either edit it (manifest file
    - Cycle → break by removing the least-defensible dep.
    - Over-declared dep (no clear "B can't be implemented without A merged" reason) → **remove** it. Each dep strictly serializes work.
 
+4a. **Linear native blocks/blocked-by relations.** For every issue with non-empty `depends_on` in the manifest, fetch the issue with `mcp__plugin_linear_linear__get_issue` passing `includeRelations=true`. The Linear `relations.blockedBy[].issue.identifier` set MUST equal the manifest's `depends_on` set for that issue. If a manifest dep isn't in `blockedBy`, call `save_issue` with `id=<this issue>, blockedBy=<missing dep keys>` to add it (the API is append-only). If `blockedBy` has entries NOT in the manifest's `depends_on` (extras), use `save_issue` with `removeBlockedBy=<extra keys>` to drop them. The text "## Depends on" section in the description is the human-readable mirror; the structured relation is what shows up in Linear's UI Relations panel and what other consumers (this reviewer, downstream tooling) can query reliably.
+
 5. **Sizing sanity.** If an issue's description hints at >500 lines of net diff or 5+ files across multiple concerns, **split it** into 2+ tighter issues (`save_issue` to create the splits, `save_issue` with `state="Cancelled"` on the original, update `manifest.issues`). A 1-issue manifest for a sub-epic that obviously needs decomposition: same — split.
 
 6. **Merge ordering.** If `merge_order` is declared on an issue, it MUST be a subset of that issue's `repos`, and the order MUST be derivable from genuine dependencies (e.g. protos before consumers). Strip out-of-list entries. Re-order or remove entirely if the ordering is arbitrary.

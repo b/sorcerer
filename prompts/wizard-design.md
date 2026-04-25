@@ -114,8 +114,15 @@ Write to `<state_dir>/manifest.json.tmp`, then `bash -c 'jq . "<state_dir>/manif
 7. **Touch heartbeat.**
 8. **Create the Linear project** via `mcp__plugin_linear_linear__save_project`. Capture the `id`.
 9. **Touch heartbeat.**
-10. **Create each Linear issue** via `mcp__plugin_linear_linear__save_issue`. After each call, capture the response's `id` field — that's the Linear identifier (e.g. `SOR-42`). Track in your in-memory issue list. Include `wizard:<wizard_id>` in `labels`.
+10. **Create each Linear issue** via `mcp__plugin_linear_linear__save_issue`. After each call, capture the response's `id` field — that's the Linear identifier (e.g. `SOR-42`). Track in your in-memory issue list. Include `wizard:<wizard_id>` in `labels`. **Do NOT pass `blockedBy` / `blocks` on the create call** — at create time, dependent issues haven't been created yet. Native relations are populated in the next step once every issue exists.
 11. **Touch heartbeat.**
+11.5. **Populate native Linear blocks/blocked-by relations from the manifest's `depends_on`.** This is what makes the dep graph visible in Linear's UI (the Relations panel on each issue). For every issue in your in-memory list whose `depends_on` is non-empty:
+    ```
+    mcp__plugin_linear_linear__save_issue
+      id        = <this issue's identifier, e.g. SOR-171>
+      blockedBy = <list of identifiers from this issue's depends_on>
+    ```
+    `save_issue.blockedBy` is append-only — calling it multiple times with overlapping sets is safe. Issues with empty `depends_on` get no save_issue call here. The `## Depends on` markdown section in the description (from step 10's create) is preserved as a human-readable mirror; it does not replace the structured relation.
 12. **Atomic write of manifest.json.** Write the JSON to `manifest.json.tmp` via the Write tool, then `bash -c 'jq . "<state_dir>/manifest.json.tmp" > "<state_dir>/manifest.json.validated" && mv "<state_dir>/manifest.json.validated" "<state_dir>/manifest.json" && rm -f "<state_dir>/manifest.json.tmp"'`. The `jq .` confirms the content is valid JSON; the `mv` is the atomic publish; coordinator detects completion via `manifest.json` existence.
 13. **Verify the file is non-empty.** `bash -c 'test -s <state_dir>/manifest.json && jq -e . <state_dir>/manifest.json >/dev/null || { echo "DESIGNER_FAILED: manifest empty or invalid"; exit 1; }'`. If it passes, proceed.
 14. **Clean up scratch worktrees.** For each entry under `<state_dir>/scratch/`:
