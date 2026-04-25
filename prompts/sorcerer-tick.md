@@ -1067,38 +1067,124 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
 
 3. **Merge-readiness gate (pre-empts the other gates when it fails).** If ANY PR in the set has `mergeable == "CONFLICTING"` or `mergeStateStatus` in `["BEHIND", "DIRTY"]`:
    - This is a rebase situation, not a review situation. Proceed to step 6c (rebase path) — do NOT run CI/bot/LLM gates against a branch that's behind main, it'll just produce noise.
-   - Exception: if the wizard's `conflict_cycle >= max_refer_back_cycles` (reusing the same cap), skip the rebase path and escalate with `rule: conflict-cap-reached`. The default cap is 5 rebase attempts.
+   - Exception: if the wizard's `conflict_cycle >= max_refer_back_cycles` (reusing the same cap), skip the rebase path and escalate with `rule: conflict-cap-reached`. The default cap is 8 rebase attempts.
 
 4. **CI gate.** Every check in every PR's `statusCheckRollup` must have `conclusion == "SUCCESS"` (or `SKIPPED` for checks the repo considers optional — treat `SKIPPED` as passing). If ANY check has `conclusion` in `["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STALE"]`: **route to refer-back (step 6b)**, not escalate. The wizard's feedback session fixes the failing check. The concerns list in the refer-back comment must enumerate the specific failing checks by name + which PR they're on.
 
 5. **Bot gate.** Scan PR comments for unresolved automated-reviewer findings. Heuristic: look for comments from known bot accounts (e.g. `coderabbitai`, `bug-bot`, `dependabot`) where the most recent comment from that bot is not addressed (no follow-up commit since). If any open finding: **route to refer-back (step 6b)**. The concerns list enumerates each bot finding with repo + file/line + what the bot said.
 
-6. **LLM gate (you, the tick LLM, do this inline).** Fetch the Linear issue: `mcp__plugin_linear_linear__get_issue` with `id=<issue_linear_id>`. Read its description carefully, especially the **Acceptance criteria** section. Then read the PR diffs (from each PR's `files` field, which includes patches). Judge:
-   - Do the changes satisfy every acceptance criterion?
-   - Are there any glaring quality issues (security holes, missing tests, scope creep into repos not in the issue's `repos`, broken existing functionality)?
-   - Is the diff size proportional to what the criteria asked for, or is it suspiciously large or small?
+6. **LLM gate — substantive code review (you, the tick LLM, do this inline).**
 
-   **Per-criterion verdict (mandatory).** Before reaching an overall decision, produce an explicit verdict for EACH `- [ ]` checkbox in the Acceptance criteria section. Hold this in memory for steps 6a / 6b — without it, neither the audit comment (6a) nor a refer-back's concerns list (6b) can be tied back to specific criteria, and the merge decision becomes opaque. Schema (in your working memory; you'll serialize it in 6a):
+   The merge gate is a code review, not a checklist tick. CI green and "the file exists" are necessary conditions; the sufficient condition is that a senior reviewer would approve. Five mandatory stages. Each stage produces evidence the next stage uses; skipping any stage produces a shallow review and the gate stops adding value.
+
+   ### Stage 6.1 — Gather full review materials
+
+   - **Full diff per PR.** `gh pr diff <pr_url>` for each PR in `pr_urls`. NOT `gh pr view --json files` — that JSON field truncates per-file patches above ~30KB and silently drops them entirely above ~1MB; on a 5000-line bump-class PR, you'd review filenames only and not notice. The unified-diff output is what you reason over.
+   - **Linear issue body** — `mcp__plugin_linear_linear__get_issue` with `id=<issue_linear_id>`. Read description + acceptance criteria fully (do not summarize and discard).
+   - **Cited design docs.** Scan the issue body for paths matching `docs/.*\.md` and `adr/\d+`. For each: fetch the post-PR version via the worktree (`<worktree_path>/<doc_path>`) — these may have been touched by the diff. For ADRs cited as "pinned" or "load-bearing", read in full; for subsystem docs, at minimum read the section the issue body cites.
+   - **Project rules.** `<repo>/CLAUDE.md` and `<repo>/AGENTS.md` (if present), plus `<repo_parent>/CLAUDE.md` and `<repo_parent>/AGENTS.md` (workspace-level). These pin the project's anti-patterns; you'll need them in stage 6.3.
+   - **Cited code in its post-PR state.** Any non-trivial file in the diff — read it from the wizard's worktree, not just the patch. The patch shows the delta; the file shows whether the result is coherent.
+
+   **Diff sampling for large PRs.** If a single PR's diff exceeds ~5000 lines, you may sample — but the sample MUST cover: every `Cargo.toml` / `build.rs` / `lib.rs` / `mod.rs` / public-API file in full, every `tests/` file in full, every design-doc edit in full, plus 3–5 representative implementation files in full. Vendored-source replacements (e.g., a `vendor/<lib>/src/` swap to a known upstream tag) may be reviewed by spot-check + verifying the upstream tag matches `VENDOR_REV`. Do NOT skip the sampling and review filenames only — that is the failure mode this stage exists to prevent.
+
+   ### Stage 6.2 — Per-file walkthrough
+
+   For each non-trivial file in the diff (skip pure-formatting churn, regenerated lock files, and vendored-source bytes whose source-of-truth is upstream), produce one paragraph in your working notes:
+
+   - **What changed** — the actual code or content change, in your own words. "Added struct `Foo` with field `bar: Baz`" beats "added 30 lines to foo.rs".
+   - **Why** — which acceptance criterion or which design-doc section requires this change. Cite the criterion text or the doc anchor.
+   - **Failure mode** — what observably breaks if this change is wrong, missing, or buggy. "Snapshots produced by this code path would have non-deterministic IDs and break the parity contract" beats "tests would fail".
+   - **Test coverage** — which test in the diff (or in the existing test corpus) exercises this code path. Cite by file + test-fn name. "No test" is a flag, not a pass — note it for stage 6.5.
+
+   This walkthrough is the substrate for stages 6.3 and 6.4. Without it, the criterion verdicts and anti-pattern checks are unfounded; you'll be reasoning from filenames.
+
+   ### Stage 6.3 — Anti-pattern checklist
+
+   Walk the project's stated anti-patterns against the diff. The list is sourced from the project's `CLAUDE.md` / `AGENTS.md` files; the items below are the stable archers / etherpilot-workspace set, but always re-read CLAUDE.md in case the project has added rules.
+
+   For each item: state PASS or FAIL with a one-line citation (file:line on FAIL).
+
+   - **Mechanical Java port.** `archers/CLAUDE.md` § "Idiomatic Rust over mechanical Java port". Scan for: class-by-class field copies that mirror a Java type's full surface, getter/setter pairs (`get_x()` / `set_x()`), `*Builder` companions for plain-data structs, `Box<dyn Trait>` hierarchies that mirror Java inheritance, ThreadLocal-style state, `Optional`-named types where `Option` would do.
+   - **Non-idiomatic Rust.** `Arc<Mutex<...>>` chains where ownership transfer would suffice; index loops where iterator combinators would; `String` where a newtype would clarify role (e.g. `NodeId`, `SnapshotId`); exception-style returns (`panic!` in non-test paths) where `Result` / `Option` is the contract.
+   - **AI / LLM mentions in checked-in content.** Grep the diff for `Claude`, `Generated with`, `Co-Authored-By: Claude`, `🤖`, `Anthropic`. Any hit FAILS the gate (refer-back, not escalate — the wizard can rewrite the commit/PR).
+   - **Scope creep.** Files touched outside the issue's declared `repos` allowlist; files touched outside the design-doc's stated module boundaries; new dependencies not approved by the design doc; new ADRs introduced by an implementation PR (ADRs are the architect's surface, not the wizard's).
+   - **Scope shortfall masquerading as N/A.** Acceptance criteria the wizard claims as N/A but that the design doc treats as load-bearing. Cross-check the criterion against the doc.
+   - **Test quality.** Tests that assert only type signatures (`assert!(matches!(x, MyEnum::Variant))` without verifying state); `assert_eq!(x, x)` tautologies; `#[ignore]` without justification in the diff; tests that exercise the happy path but skip the failure path the design doc calls out.
+   - **Determinism violations.** `HashMap` / `HashSet` introduced on a path the design doc requires deterministic iteration (see the project's "Determinism notes" sections); `rand`, `SystemTime`, or `Instant` used as seed material without an explicit deterministic source; canonical-bytes / canonical-hash code that depends on iteration order of a non-deterministic collection.
+   - **Commit-size split.** Did the wizard split work into multiple PRs that leave intermediate states non-building or non-passing? `archers/CLAUDE.md` says "no commit-size limit" — splitting that breaks the build is itself a flag.
+   - **Wire-parity violation.** For changes that touch the parity surface (canonical hashes, AF-tagged JSON, gRPC/REST shape — per ADR 0003), did the wizard re-baseline a golden hash without explanation? Is there a regression on a parity test the diff doesn't mention?
+
+   FAIL on any item routes to refer-back (or escalate for the AI-attribution case if the cycle cap is reached).
+
+   ### Stage 6.4 — Per-criterion verdicts
+
+   Now produce the per-criterion verdicts. Same schema as before, **stricter evidence requirement**:
 
    ```
    criterion_verdicts = [
      { "criterion": "<exact text from the - [ ] line, minus the checkbox prefix>",
        "verdict":   "verified | not_verified | not_applicable",
-       "reason":    "<one-line: which file/test demonstrates verification, or why not applicable>" },
+       "reason":    "<MUST cite file:line and test-fn name; see examples below>" },
      ...
    ]
    ```
 
-   - `verified` — the diff demonstrates this criterion is satisfied (cite the file or test that proves it).
-   - `not_verified` — criterion is not met by this diff. ANY `not_verified` forces refer-back (or escalate if severe).
-   - `not_applicable` — the criterion legitimately doesn't apply to this implementation (e.g. "Update CLAUDE.md if patterns changed" when no patterns changed). Note the reason; don't hide the disagreement.
+   The `reason` field MUST cite a file:line that demonstrates the criterion is met AND a test that exercises it (when the criterion has runtime behavior). Examples:
 
-   Preserve criterion order from the issue body. If the issue has no `Acceptance criteria` section or no `- [ ]` lines, set `criterion_verdicts = []` and note this in step 6a's audit comment.
+   - **Insufficient (rejected):** `"verified — handle.rs exists"` — file existence is not implementation correctness.
+   - **Insufficient (rejected):** `"verified — tests pass"` — CI already gated on that; the LLM gate isn't adding value.
+   - **Sufficient:** `"verified — handle.rs:42 implements Drop per BDD.md §'Refcount lifecycle'; tests/handle_drop.rs::derefs_on_drop covers the path"`.
+   - **Sufficient:** `"verified — vendor/sylvan/VENDOR_REV pinned to v1.10.0 (commit 4c2d…); diff against upstream tag is byte-identical (cargo build -p archers-sylvan green confirms compile)"`.
+   - **For not_applicable:** `"not_applicable — fixture criterion explicitly deferred to follow-up SOR-N+1 per the issue body's Out-of-scope section"` — cite where the deferral was sanctioned.
 
-   **Decision:**
-   - **merge** — every criterion is `verified` or `not_applicable`, AND no significant concerns beyond the criteria. Proceed to step 6a.
-   - **refer-back** — at least one `not_verified` criterion that's fixable, or fixable concerns outside the criteria (missing test, minor bug, style issue, etc.). Proceed to step 6b.
-   - **escalate** — high-severity security finding, or anything sorcerer cannot autonomously resolve. Update entry to `status: blocked`, append to `.sorcerer/escalations.log` with `rule: review-escalation` and a description. Also escalate if `refer_back_cycle >= max_refer_back_cycles` (hard cap from `config.json:limits.max_refer_back_cycles`, default 5). Note: `CONFLICTING` / `BEHIND` no longer escalates — step 3 routes those to 6c (rebase) first.
+   If you cannot produce a citation that strong, the criterion is **not_verified**, not "verified with weaker evidence". The merge gate's value is exactly that it refuses to accept weak evidence.
+
+   - `verified` — the diff demonstrates this criterion is satisfied (cite per the strict form above).
+   - `not_verified` — criterion is not met by this diff, OR evidence is too weak. ANY `not_verified` forces refer-back (or escalate if severe).
+   - `not_applicable` — the criterion legitimately doesn't apply to this implementation. Note the reason and where the deferral was sanctioned; don't hide the disagreement.
+
+   Preserve criterion order from the issue body. If the issue has no `Acceptance criteria` section or no `- [ ]` lines, set `criterion_verdicts = []` and note it in stage 6.5's audit notes.
+
+   ### Stage 6.5 — Senior-reviewer push-back pass
+
+   Open-ended. After the structured walkthrough + anti-pattern check + per-criterion verdicts, ask: **what would a senior engineer flag in code review that the structured passes missed?**
+
+   Categories to consider (non-exhaustive):
+
+   - **Edge cases the design doc doesn't mention** but the implementation should handle (empty inputs, max-size inputs, AF mismatches, concurrent access from where the design assumed single-threaded).
+   - **Test gaps** — design says X must be tested; tests cover X happy path but not the failure paths the doc explicitly enumerates.
+   - **API decisions** the wizard made that aren't in the criteria but affect downstream consumers — return-type choices, error-variant additions, lifetime bounds, sealed-trait status.
+   - **Performance footguns** that don't show up in unit tests — allocation in hot paths, blocking calls in async functions, O(n²) algorithms where the design assumed O(n).
+   - **Documentation rot** — the implementation diverged from the design doc in a way that's correct but undocumented; design doc needs an update PR.
+   - **Future-trap-shaped patterns** — e.g., a defensive branch in production code that's dead under current wiring (the kind of pattern that becomes a stale "fall back to X" comment future readers misinterpret as a feature flag).
+
+   Produce 0–5 push-back items into a `reviewer_observations` array (your working memory):
+
+   ```
+   reviewer_observations = [
+     { "concern":     "<one-sentence description of the concern>",
+       "location":    "<file:line or design-doc reference>",
+       "disposition": "fix | accept | defer",
+       "rationale":   "<one-sentence: why this disposition>" },
+     ...
+   ]
+   ```
+
+   - **fix** — must be addressed before merge. Routes to refer-back regardless of criterion verdicts.
+   - **accept** — known-acceptable trade-off; merge proceeds, but the observation goes into the audit comment so it's preserved.
+   - **defer** — should be tracked as a follow-up issue; merge proceeds, observation goes into the audit comment + a note that a follow-up should be filed.
+
+   **Stating "0 items, no additional concerns" explicitly is required** — silence is ambiguous between "I checked and found nothing" and "I didn't check". Set `reviewer_observations = []` and proceed.
+
+   ### Decision
+
+   Combine the stage outputs:
+
+   - **merge** — every `criterion_verdict` is `verified` or `not_applicable`, every anti-pattern check is PASS, and no `reviewer_observations` entry has `disposition: fix`. Proceed to step 6a.
+   - **refer-back** — at least one `not_verified` criterion, OR an anti-pattern FAIL, OR a `reviewer_observations` entry with `disposition: fix`. Proceed to step 6b. Aggregate every failure into the concerns list.
+   - **escalate** — high-severity security finding (a `reviewer_observations` entry whose concern is security-bearing AND `disposition: fix`), or anything sorcerer cannot autonomously resolve. Update entry to `status: blocked`, append to `.sorcerer/escalations.log` with `rule: review-escalation` and a description. Also escalate if `refer_back_cycle >= max_refer_back_cycles` (hard cap from `config.json:limits.max_refer_back_cycles`, default 8). Note: `CONFLICTING` / `BEHIND` no longer escalates — step 3 routes those to 6c (rebase) first.
+
+   The `criterion_verdicts` and `reviewer_observations` arrays plus the anti-pattern check results are consumed by step 6a's audit comment (merge path) and step 6b's refer-back concerns list (refer-back path). Hold all three in memory until the chosen path is complete.
 
 6a. **Merge action** (only when decision == merge):
    - **Pre-merge re-verification (mandatory, belt-and-suspenders).** The decision was made on data fetched at the top of step 12; a check could have flipped red in the meantime. For each PR in the set, re-fetch and confirm ALL of:
@@ -1117,21 +1203,38 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
 
    - **Audit trail (post-merge, best-effort).** Once every PR in the set has merged successfully, write the per-criterion verdict (from step 6's `criterion_verdicts` array) where humans and future ticks can see it. The merge commits are already done — these writes only fail loudly in logs, never unwind the merge.
 
-     1. **Linear comment with full verdict.** Build a markdown body and post via `mcp__plugin_linear_linear__save_comment` with `issueId=<issue_linear_id>`:
+     1. **Linear comment with full verdict.** Build a markdown body and post via `mcp__plugin_linear_linear__save_comment` with `issueId=<issue_linear_id>`. The body has three subsections — per-criterion verdict, anti-pattern check, reviewer observations — so the structured rationale collected across stages 6.3 / 6.4 / 6.5 is preserved alongside the merge:
         ```markdown
         ## sorcerer review: merged
 
         Per-criterion verdict:
 
-        - ✅ <criterion text>: <reason — file/test that demonstrates>
+        - ✅ <criterion text>: <reason — file:line + test-fn name>
         - ✅ <criterion text>: <reason>
-        - N/A <criterion text>: <reason — why not applicable>
+        - N/A <criterion text>: <reason — why not applicable; cite where deferral was sanctioned>
 
-        Merged PRs:
-        - <owner>/<repo>: <pr_url>
-        - <owner>/<repo>: <pr_url>
+        Anti-pattern check:
+
+        - ✅ Mechanical Java port: <one-line citation, or "no relevant changes">
+        - ✅ Non-idiomatic Rust: <one-line citation>
+        - ✅ AI / LLM mentions: <one-line citation, or "no matches">
+        - ✅ Scope creep: <one-line citation>
+        - ✅ Scope shortfall masquerading as N/A: <one-line citation>
+        - ✅ Test quality: <one-line citation>
+        - ✅ Determinism violations: <one-line citation>
+        - ✅ Commit-size split: <one-line citation>
+        - ✅ Wire-parity violation: <one-line citation>
+
+        Reviewer observations:
+
+        - [accept] <concern> (at <location>): <rationale>
+        - [defer] <concern> (at <location>): <rationale> — follow-up issue recommended
         ```
-        Map the in-memory verdicts: `verified` → `✅`, `not_applicable` → `N/A`. (Merge path implies no `not_verified` — if any present, the decision should have been refer-back; treat as a bug and emit `❌` on the line so the audit is honest, but still proceed since the merge already happened.) When `criterion_verdicts` is empty (issue had no checkbox criteria), include a single line `_No checkbox acceptance criteria found in the issue body — review approved on overall judgment._` so the absence is recorded explicitly rather than implied by silence.
+        Map the in-memory verdicts: `verified` → `✅`, `not_applicable` → `N/A`. (Merge path implies no `not_verified` — if any present, the decision should have been refer-back; treat as a bug and emit `❌` on the line so the audit is honest, but still proceed since the merge already happened.) When `criterion_verdicts` is empty (issue had no checkbox criteria), include a single line under the verdict subsection: `_No checkbox acceptance criteria found in the issue body — review approved on overall judgment._` so the absence is recorded explicitly rather than implied by silence.
+
+        For the **Anti-pattern check** subsection: every item from stage 6.3's checklist appears, even when PASS — silence on an item is ambiguous between "checked, clean" and "didn't check". On PASS with no relevant changes, write "no relevant changes" rather than omitting the line.
+
+        For the **Reviewer observations** subsection: every entry in `reviewer_observations` appears, prefixed with its `disposition` (`[accept]` or `[defer]` — `[fix]` entries should have routed to refer-back, not merge). Omit the subsection entirely only when `reviewer_observations` is empty; in that case, emit a single line `_No additional concerns beyond the structured passes._` so the explicit no-concerns finding is recorded.
 
      2. **Linear issue body — tick verified criteria.** Re-fetch the issue's current `description` via `mcp__plugin_linear_linear__get_issue` immediately before this update — DO NOT reuse the description from step 6's fetch. Seconds have elapsed and a webhook from the just-merged PRs may have appended to the body; reusing the stale copy would clobber those edits on save. Apply the ticks against the freshly-fetched body. For each verdict with `verified`, replace the matching `- [ ] <criterion>` line with `- [x] <criterion>` — match by **trimmed** equality (strip leading/trailing whitespace from both sides of the comparison), single replacement per criterion (leftmost match), preserving the line's original whitespace exactly in the output. Do NOT modify lines for `not_applicable` or `not_verified` verdicts — the comment carries that nuance; ticking N/A would erase the distinction. Save via `mcp__plugin_linear_linear__save_issue` with `id=<issue_linear_id>` and `description=<updated body>`. If no `- [ ]` line matches a verified criterion (criterion text drifted), log `tick: criterion text drift on <issue_key> — comment posted, body unchanged for "<criterion>"` and proceed — the comment is the canonical record and is unaffected.
 

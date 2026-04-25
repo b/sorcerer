@@ -160,7 +160,7 @@ claude --version && claude -p "echo ready"
   },
   "limits": {
     "max_concurrent_wizards": 3,
-    "max_refer_back_cycles":  5
+    "max_refer_back_cycles":  8
   },
   "merge": {
     "strategy":      "squash",

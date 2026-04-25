@@ -367,7 +367,7 @@ EOF
       },
       limits: {
         max_concurrent_wizards: 3,
-        max_refer_back_cycles:  5,
+        max_refer_back_cycles:  8,
         max_wizard_age_seconds: {
           architect:         1800,
           "architect-review": 900,
