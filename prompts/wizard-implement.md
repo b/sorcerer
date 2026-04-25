@@ -118,11 +118,20 @@ For EACH repo (in `merge_order` if declared, else any order):
    - [ ] <bulleted markdown checklist>
    EOF
    )"` — capture the PR URL. Do NOT add "Generated with Claude Code" or any other automated-attribution footer to the PR body.
-8. Resolve any automated bot findings on the PR per the /wizard skill's Phase 8 cycle: every finding gets a fix commit OR a false-positive reply. Iterate until the bot status is clean.
+
+**Do NOT wait for or poll automated bot findings on the PR.** Bots (CodeRabbit, Bug Bot, etc.) typically take seconds to minutes to post findings, sometimes much longer. **Resolving bot findings is not your job** — the coordinator's tick has a bot gate (sorcerer-tick.md step 12) that detects findings as they appear and refers them back via a feedback wizard. Your job ends at PR open.
+
+**Forbidden patterns** (these are the failure mode that triggers max_wizard_age kill-switch):
+- `until [ "$(gh pr checks ...)" ]; do touch <heartbeat>; sleep N; done` or any equivalent shape.
+- `while ! <bot-clean-condition>; do sleep N; done`.
+- Any shell loop that touches the heartbeat to stay alive while waiting on an external state change.
+- Repeated `gh pr view`/`gh pr checks` invocations spaced over time hoping bots will finish.
+
+If you find yourself reaching for `sleep` to wait on the PR — stop, hand off. The coordinator polls for you.
 
 ### Phase 9 — Hand off to coordinator
 
-After every repo has a clean PR (no failing required checks, no unresolved bot findings):
+Once every repo has its PR open (test suite green at push time; bot findings explicitly NOT a precondition):
 
 1. Atomic write of `<state_dir>/pr_urls.json` via `jq -n` so shell quoting and special characters can't corrupt it:
    ```bash
