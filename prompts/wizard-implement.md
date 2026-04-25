@@ -100,8 +100,14 @@ For EACH repo (in `merge_order` if declared, else any order):
 2. `cd <worktree_paths[repo]>`.
 3. Stage files explicitly by name (do NOT `git add -A` — risks committing secrets or build artifacts).
 4. `git commit -m "<message>"` with a clear message. Do NOT add Co-Authored-By, "Generated with Claude Code," or any other automated-attribution trailer — sorcerer does not sign commits on the user's behalf.
-5. `git push -u origin <branch_name>` (first push) or `git push` (subsequent).
-6. `gh pr create --title "<title>" --body "$(cat <<'EOF'
+5. **Rebase onto current default branch before pushing.** Other wizards may have merged work into `<default_branch>` while you were implementing. Opening a PR that's already behind triggers an immediate rebase-wizard cycle, so rebase here:
+   - `git fetch origin "<default_branch>"`.
+   - `git rebase "origin/<default_branch>"`.
+   - **Clean rebase** → continue to push.
+   - **Conflicts** → resolve file-by-file preserving the intent of your just-written change (you have full context on it). After each file, `git add <file>`; once all resolved, `git rebase --continue`. Re-run the repo's relevant test suite (per `/wizard` skill Phase 5) once the rebase completes — silent breaks happen even without conflict markers. Fix any breakage with an additional commit before pushing.
+   - **Unresolvable conflict** (semantically contradictory change upstream that you can't reconcile without product-level input) → `git rebase --abort`, print `IMPLEMENT_FAILED: unresolvable rebase conflict in <repo>:<file>`, remove heartbeat, exit non-zero. The coordinator escalates.
+6. `git push -u origin <branch_name>` (first push) or `git push` (subsequent).
+7. `gh pr create --title "<title>" --body "$(cat <<'EOF'
    ## Summary
    <1-3 bullets>
 
@@ -112,7 +118,7 @@ For EACH repo (in `merge_order` if declared, else any order):
    - [ ] <bulleted markdown checklist>
    EOF
    )"` — capture the PR URL. Do NOT add "Generated with Claude Code" or any other automated-attribution footer to the PR body.
-7. Resolve any automated bot findings on the PR per the /wizard skill's Phase 8 cycle: every finding gets a fix commit OR a false-positive reply. Iterate until the bot status is clean.
+8. Resolve any automated bot findings on the PR per the /wizard skill's Phase 8 cycle: every finding gets a fix commit OR a false-positive reply. Iterate until the bot status is clean.
 
 ### Phase 9 — Hand off to coordinator
 
