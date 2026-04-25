@@ -1078,9 +1078,26 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
    - Are there any glaring quality issues (security holes, missing tests, scope creep into repos not in the issue's `repos`, broken existing functionality)?
    - Is the diff size proportional to what the criteria asked for, or is it suspiciously large or small?
 
+   **Per-criterion verdict (mandatory).** Before reaching an overall decision, produce an explicit verdict for EACH `- [ ]` checkbox in the Acceptance criteria section. Hold this in memory for steps 6a / 6b — without it, neither the audit comment (6a) nor a refer-back's concerns list (6b) can be tied back to specific criteria, and the merge decision becomes opaque. Schema (in your working memory; you'll serialize it in 6a):
+
+   ```
+   criterion_verdicts = [
+     { "criterion": "<exact text from the - [ ] line, minus the checkbox prefix>",
+       "verdict":   "verified | not_verified | not_applicable",
+       "reason":    "<one-line: which file/test demonstrates verification, or why not applicable>" },
+     ...
+   ]
+   ```
+
+   - `verified` — the diff demonstrates this criterion is satisfied (cite the file or test that proves it).
+   - `not_verified` — criterion is not met by this diff. ANY `not_verified` forces refer-back (or escalate if severe).
+   - `not_applicable` — the criterion legitimately doesn't apply to this implementation (e.g. "Update CLAUDE.md if patterns changed" when no patterns changed). Note the reason; don't hide the disagreement.
+
+   Preserve criterion order from the issue body. If the issue has no `Acceptance criteria` section or no `- [ ]` lines, set `criterion_verdicts = []` and note this in step 6a's audit comment.
+
    **Decision:**
-   - **merge** — criteria met, no significant concerns. Proceed to step 6a.
-   - **refer-back** — fixable concerns (missing test, minor bug, style issue, etc.). Proceed to step 6b.
+   - **merge** — every criterion is `verified` or `not_applicable`, AND no significant concerns beyond the criteria. Proceed to step 6a.
+   - **refer-back** — at least one `not_verified` criterion that's fixable, or fixable concerns outside the criteria (missing test, minor bug, style issue, etc.). Proceed to step 6b.
    - **escalate** — high-severity security finding, or anything sorcerer cannot autonomously resolve. Update entry to `status: blocked`, append to `.sorcerer/escalations.log` with `rule: review-escalation` and a description. Also escalate if `refer_back_cycle >= max_refer_back_cycles` (hard cap from `config.json:limits.max_refer_back_cycles`, default 5). Note: `CONFLICTING` / `BEHIND` no longer escalates — step 3 routes those to 6c (rebase) first.
 
 6a. **Merge action** (only when decision == merge):
@@ -1098,12 +1115,41 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
      ```
      For each PR (in `merge_order` if declared, else any order). If `gh pr merge` fails for any reason (branch protection rejects, checks flipped red between re-verify and merge, network blip): log the failure, do NOT continue merging subsequent PRs in the set (partial-merge state is the worst outcome), and leave the wizard at `awaiting-review`. Append an escalation with `rule: merge-rejected-after-gates` including the gh error. Next tick re-evaluates.
 
+   - **Audit trail (post-merge, best-effort).** Once every PR in the set has merged successfully, write the per-criterion verdict (from step 6's `criterion_verdicts` array) where humans and future ticks can see it. The merge commits are already done — these writes only fail loudly in logs, never unwind the merge.
+
+     1. **Linear comment with full verdict.** Build a markdown body and post via `mcp__plugin_linear_linear__save_comment` with `issueId=<issue_linear_id>`:
+        ```markdown
+        ## sorcerer review: merged
+
+        Per-criterion verdict:
+
+        - ✅ <criterion text>: <reason — file/test that demonstrates>
+        - ✅ <criterion text>: <reason>
+        - N/A <criterion text>: <reason — why not applicable>
+
+        Merged PRs:
+        - <owner>/<repo>: <pr_url>
+        - <owner>/<repo>: <pr_url>
+        ```
+        Map the in-memory verdicts: `verified` → `✅`, `not_applicable` → `N/A`. (Merge path implies no `not_verified` — if any present, the decision should have been refer-back; treat as a bug and emit `❌` on the line so the audit is honest, but still proceed since the merge already happened.) When `criterion_verdicts` is empty (issue had no checkbox criteria), include a single line `_No checkbox acceptance criteria found in the issue body — review approved on overall judgment._` so the absence is recorded explicitly rather than implied by silence.
+
+     2. **Linear issue body — tick verified criteria.** Re-fetch the issue's current `description` via `mcp__plugin_linear_linear__get_issue` immediately before this update — DO NOT reuse the description from step 6's fetch. Seconds have elapsed and a webhook from the just-merged PRs may have appended to the body; reusing the stale copy would clobber those edits on save. Apply the ticks against the freshly-fetched body. For each verdict with `verified`, replace the matching `- [ ] <criterion>` line with `- [x] <criterion>` — match by **trimmed** equality (strip leading/trailing whitespace from both sides of the comparison), single replacement per criterion (leftmost match), preserving the line's original whitespace exactly in the output. Do NOT modify lines for `not_applicable` or `not_verified` verdicts — the comment carries that nuance; ticking N/A would erase the distinction. Save via `mcp__plugin_linear_linear__save_issue` with `id=<issue_linear_id>` and `description=<updated body>`. If no `- [ ]` line matches a verified criterion (criterion text drifted), log `tick: criterion text drift on <issue_key> — comment posted, body unchanged for "<criterion>"` and proceed — the comment is the canonical record and is unaffected.
+
+     3. **Per-PR pointer comment.** For each PR in the set:
+        ```bash
+        gh pr comment "<pr_url>" --body "Reviewed and approved by sorcerer. Per-criterion verdict on Linear: <linear-issue-url>"
+        ```
+        Resolve `<linear-issue-url>` from the issue object's `url` field. This makes the GitHub-side review state non-opaque — anyone viewing the merged PR sees the explicit approval pointer.
+
+     If any of these three writes errors (Linear API blip, gh CLI failure): log the specific failure (`tick: audit-write failed for <issue_key>: <step>: <error>`) and continue to the next sub-step. Don't unwind the merge, don't escalate — the merge has already shipped. The next tick won't re-attempt audit writes (state has moved past `awaiting-review`); operators looking at a missing-audit issue can re-run the comment manually.
+
    - Update entry: `status: merging`, `review_decision: merge`.
    - Append to `.sorcerer/events.log`:
      ```json
-     {"ts":"...","event":"review-merge","id":"<wizard-id>","issue_key":"<SOR-N>","pr_count":<N>}
+     {"ts":"...","event":"review-merge","id":"<wizard-id>","issue_key":"<SOR-N>","pr_count":<N>,"verified_count":<N>,"na_count":<N>}
      ```
-   - Print to **stdout**: `Reviewed and merged: <issue_key> (<N> PR(s)).`
+     `verified_count` and `na_count` are derived from `criterion_verdicts`; `0`/`0` is valid (issue had no checkbox criteria).
+   - Print to **stdout**: `Reviewed and merged: <issue_key> (<N> PR(s)). Verdict: <V> verified, <NA> N/A.`
 
 6b. **Refer-back action** (only when decision == refer-back):
    - Increment `refer_back_cycle` on the entry (initialize to 0 if absent, so first refer-back sets it to 1).
