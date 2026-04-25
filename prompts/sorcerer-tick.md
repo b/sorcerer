@@ -261,15 +261,26 @@ extract_reset_iso() {
 }
 ```
 
-Use `extract_reset_iso` to populate `retry_after` for the wizard and `providers_state[$P].throttled_until` for the provider. Fall back to `now + 300s` only when `extract_reset_iso` returns non-zero.
+Use `extract_reset_iso` to populate **only** `providers_state[$P].throttled_until` for the provider — that's the real window during which `$P` will keep returning 429s. Fall back to `now + 300s` only when `extract_reset_iso` returns non-zero.
+
+**The wizard's `retry_after` is a SEPARATE concept** — see "Wizard vs provider throttles" immediately below. Do NOT set the wizard's `retry_after` from `extract_reset_iso`.
+
+**Wizard vs provider throttles (decoupled).** A 429 means *one provider* is rate-limited, not that the wizard's work has to wait that long. With provider cycling configured, work should resume on the fallback slot as soon as the wizard is respawnable; the provider rotation is what enforces "don't try $P until its window clears", not the wizard's own clock. So:
+
+- **Provider** `providers_state[$P].throttled_until` — the real reset window (parsed via `extract_reset_iso`, fallback `now + 300s`). Spawn-time provider selection consults this.
+- **Wizard** `retry_after` — a short fixed cooldown (`now + 60s`, same as the 529 path), independent of which provider 429'd. After 60s the wizard becomes spawnable; `scripts/apply-provider-env.sh` skips the still-throttled `$P` and picks the next available slot.
+
+If every provider is throttled, `paused_until` (set per "Global pause" below) gates the coordinator at the loop level — the wizard's 60s cooldown is harmless under pause because ticks don't run while paused.
+
+The previous design tied the wizard's `retry_after` to the provider's reset, which made the wizard sit through `$P`'s full window even when a fallback provider was wide open. That's the bug this guidance fixes.
 
 **Which provider ran this wizard?** Read `<state_dir>/provider` (written by `scripts/spawn-wizard.sh` at spawn time). When empty or missing, `config.json:providers` is unconfigured and there's nothing to mark throttled — only the wizard itself gets the `throttled` status.
 
 If 429 detected:
 
-1. Mark the entry `status: throttled`, `retry_after: <ISO-8601>` (compute: `now + 300s`, floor). Do NOT increment `respawn_count`; throttling isn't a crash.
+1. Mark the entry `status: throttled`, `retry_after: <now + 60s>`. Short fixed cooldown — see "Wizard vs provider throttles (decoupled)" above. Do NOT increment `respawn_count`; throttling isn't a crash.
 2. Increment a `throttle_count` field on the entry (initialize to 0).
-3. **If `<state_dir>/provider` is non-empty** (let its content be `$P`): mark the provider as throttled too — set `.providers_state[$P].throttled_until = <same ISO-8601>`, `.providers_state[$P].throttle_count += 1`, `.providers_state[$P].last_throttled_at = now`. Append:
+3. **If `<state_dir>/provider` is non-empty** (let its content be `$P`): mark the provider as throttled too — set `.providers_state[$P].throttled_until = <extract_reset_iso output, fallback now + 300s>` (NOT the wizard's `retry_after` value — they're decoupled), `.providers_state[$P].throttle_count += 1`, `.providers_state[$P].last_throttled_at = now`. Append:
    ```json
    {"ts":"...","event":"provider-throttled","provider":"<P>","throttled_until":"<ISO-8601>"}
    ```

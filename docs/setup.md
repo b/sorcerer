@@ -273,9 +273,9 @@ Rules:
 
 ### What happens on 429
 
-1. The wizard's log matches the 429 pattern. Coordinator marks the wizard `throttled` AND the provider it ran on `throttled_until: now+5min`.
-2. Next spawn: `scripts/apply-provider-env.sh` skips the throttled provider and picks the next one in order. Work resumes immediately on the fallback slot.
-3. If every provider is currently throttled, the coordinator sets `paused_until = earliest throttled_until` and sleeps until the first slot reopens. `/sorcerer status` surfaces the pause.
+1. The wizard's log matches the 429 pattern. Coordinator marks the wizard `throttled` with a short fixed cooldown (`retry_after = now + 60s`) AND marks the provider it ran on `throttled_until = <parsed reset time, fallback now + 5min>`. The two are deliberately decoupled: the wizard's cooldown gates *when to attempt respawn*, the provider's window gates *which provider to use*.
+2. After the 60s wizard cooldown, the next tick respawns the wizard. `scripts/apply-provider-env.sh` skips the still-throttled provider and picks the next one in order — work resumes on the fallback slot without waiting for the original provider's full reset window.
+3. If every provider is currently throttled, the coordinator sets `paused_until = earliest throttled_until` and sleeps until the first slot reopens. `/sorcerer status` surfaces the pause. Under pause, the 60s wizard cooldown is moot because ticks don't run.
 4. A single wizard that throttles three times in a row (across all providers) escalates with `rule: persistent-throttle` — that's pathological, not a cycling problem.
 
 ### Doctor check
