@@ -44,6 +44,14 @@ kill_with_timeout() {
     sleep 1
   done
   kill -KILL "$pid" 2>/dev/null || true
+  # Poll briefly for the kernel to reap the SIGKILL'd process; without this,
+  # an immediate `kill -0` from the caller can race the kernel and falsely
+  # report the process as still alive (init auto-reaps reparented children
+  # within milliseconds, but "milliseconds" is non-zero).
+  for ((i = 0; i < 10; i++)); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.1
+  done
 }
 
 # Step 1 — handle the registered pid (best-effort).
