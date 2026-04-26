@@ -1147,7 +1147,28 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
 
    ### Stage 6.5 — Senior-reviewer push-back pass
 
-   Open-ended. After the structured walkthrough + anti-pattern check + per-criterion verdicts, ask: **what would a senior engineer flag in code review that the structured passes missed?**
+   **Mandatory pre-check: deferred-work comments must cite a tracking SOR identifier.** Every TODO / placeholder / deferred-work comment in production code must be rooted to a Linear issue so the deferred work is mechanically discoverable. "Documented but untracked" is the failure mode this pre-check exists to refuse — a wizard that honestly self-documents a placeholder in a module doc still ships untracked deferred work if no SOR-NNN appears in the comment.
+
+   Grep every added or modified line in the diff for these markers (case-insensitive):
+
+   ```regex
+   TODO|FIXME|placeholder|stand-in|stub|once.+lands|once.+ships|until.+lands|for now|deferred|follow-up|Phase[ -]?[12]
+   ```
+
+   **Scope.** Production code only. Skip files under any `tests/` directory, files matching `*_test.{rs,go,py,ts,js}` / `*_tests.rs` / `*_spec.{ts,js,rb}` / `*Test.java`, and ranges inside `#[cfg(test)]` blocks (Rust). Doc files (`*.md`, `*.rst`) and design notes ARE in scope — the discipline applies workspace-wide.
+
+   For each match: if the surrounding comment does NOT contain an `SOR-\d+` reference, append a `reviewer_observations` entry:
+
+   - `concern`: `Deferred-work comment without SOR identifier at <file:line>: <comment text>`
+   - `location`: `<file:line>`
+   - `disposition`: `fix`
+   - `rationale`: `Every TODO / placeholder / deferred-work comment in production code must cite a tracking SOR identifier so the deferred work is mechanically discoverable. Either remove the comment and ship the real implementation, or add an SOR-NNN cross-reference and ensure the issue exists in Linear.`
+
+   **Refer-back verification (next cycle).** If the wizard responded by adding an `SOR-NNN` reference: verify the issue exists by calling `mcp__plugin_linear_linear__get_issue` with `id=SOR-NNN`. If the call errors, or the returned issue's `statusType` is `canceled`, refer-back again with concern `Cited SOR-NNN does not resolve to an open Linear issue`.
+
+   This pre-check is **mandatory** and runs **before** the open-ended pass below — it does not replace it. State the result explicitly: either "0 deferred-work comments without SOR identifier" or the list of fix-disposition entries it produced.
+
+   **Open-ended pass.** After the structured walkthrough + anti-pattern check + per-criterion verdicts + deferred-work pre-check, ask: **what would a senior engineer flag in code review that the structured passes missed?**
 
    Categories to consider (non-exhaustive):
 
@@ -1158,7 +1179,7 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
    - **Documentation rot** — the implementation diverged from the design doc in a way that's correct but undocumented; design doc needs an update PR.
    - **Future-trap-shaped patterns** — e.g., a defensive branch in production code that's dead under current wiring (the kind of pattern that becomes a stale "fall back to X" comment future readers misinterpret as a feature flag).
 
-   Produce 0–5 push-back items into a `reviewer_observations` array (your working memory):
+   Produce 0–5 additional push-back items into the `reviewer_observations` array (which may already contain entries from the deferred-work pre-check above; this is your working memory across both passes):
 
    ```
    reviewer_observations = [
