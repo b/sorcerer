@@ -822,7 +822,20 @@ For each `active_wizards` entry with `mode: design` and `status: awaiting-tier-3
    - Only candidates with ALL deps in a merged/done/archived state proceed.
 4. Otherwise (no deps, or all deps satisfied), the issue is a candidate to spawn implementing.
 
-Collect the candidate list across all designers. Then in steps 9 and 10, process candidates subject to the concurrency cap.
+Collect the candidate list across all designers.
+
+**Priority sort.** Before steps 9 and 10 apply the concurrency cap, sort candidates ascending by Linear `priority` so the limited spawn slots go to the most important work. For each unique `linear_id` in the candidate list, call `mcp__plugin_linear_linear__get_issue` with `id=<linear_id>` and read `priority.value` (Linear: `1`=Urgent, `2`=High, `3`=Medium, `4`=Low, `0`=None). Cache results within this tick — the same `linear_id` should not be fetched twice.
+
+Sort key per candidate:
+
+1. **Normalized priority** (ascending). Map `0` → `5` so unprioritized issues sort last; otherwise pass through. Result: Urgent (1) → High (2) → Medium (3) → Low (4) → None (5).
+2. **Manifest order** (ascending) as a stable tie-break for equal-priority candidates. Preserves the designer's intended ordering within a priority band.
+
+If the Linear MCP is in needs-auth state on this tick (any `get_issue` call returns a needs-auth error), fall back to the un-sorted (manifest-order) candidate list and log `tick: priority-sort skipped — Linear MCP needs-auth`. Do NOT escalate — degrading to FIFO is acceptable; the next tick will re-sort once auth is restored. The sort is best-effort and never blocks dispatch.
+
+Note that this affects only **which candidate gets the next spawn slot** — already-running implements are not preempted, and `depends_on` constraints from step 8.3 are still honored (they were already filtered out of the candidate list above).
+
+Then in steps 9 and 10, process candidates subject to the concurrency cap.
 
 ### Step 9 — Worktree prep for implement candidates
 
