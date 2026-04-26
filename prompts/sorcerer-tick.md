@@ -876,8 +876,9 @@ Read `config.json:limits.max_concurrent_wizards` (default 3). Count running entr
      git -C <bare-clone-path> worktree add \
        <worktree-path> \
        -b <branch_name> \
-       origin/<default-branch-from-config-or-fetched-from-gh>
+       <default-branch-from-config-or-fetched-from-gh>
      ```
+     Note: use the **local** branch ref (e.g. `main`), NOT `origin/main`. In a bare clone the default refspec `+refs/heads/*:refs/heads/*` updates `refs/heads/*` on every fetch but leaves `refs/remotes/origin/*` frozen at clone time. `origin/main` is therefore stale; the canonical tip lives at `refs/heads/main`. `ensure-bare-clones.sh` is responsible for fetching before this step so the local ref is fresh.
    - For default branch: read from `gh api repos/<owner>/<repo> -q .default_branch` once per repo (cache during this tick).
 6. Write `<state_dir>/meta.json` with `jq -n` (never bash heredocs — keeps multi-word values safe):
    ```bash

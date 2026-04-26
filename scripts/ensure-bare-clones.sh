@@ -69,6 +69,31 @@ for spec in "$@"; do
   target="$PROJECT_ROOT/.sorcerer/repos/$target_name"
 
   if [[ -d "$target" ]]; then
+    # Refresh the local refs (refs/heads/*) so callers branching off `main`
+    # / other default branches get the canonical tip, not whatever was current
+    # at clone time. The default bare-clone refspec is
+    # `+refs/heads/*:refs/heads/*`, so a fetch updates the local refs in
+    # place — no `refs/remotes/origin/*` is involved (and any such ref left
+    # over from clone time is stale by design; never use `origin/<branch>`).
+    # Fetch needs an auth token for private repos; mint per-owner tokens
+    # using the same cache as the clone path below.
+    if [[ -z "${OWNER_TOKEN[$owner]:-}" ]]; then
+      if ! out=$(GH_APP_INSTALLATION_ID= bash "$SORCERER_REPO/scripts/refresh-token.sh" --installation-owner "$owner" 2>&1); then
+        echo "WARN: could not mint token for $owner; skipping fetch on $target (existing refs may be stale)" >&2
+        continue
+      fi
+      eval "$out"
+      OWNER_TOKEN[$owner]="$GITHUB_TOKEN"
+    fi
+    tok="${OWNER_TOKEN[$owner]}"
+    # Pass the tokenized URL directly to fetch (mirroring the clone path) so
+    # remote.origin.url stays clean of credentials. The fetch refspec is the
+    # default `+refs/heads/*:refs/heads/*` from the bare clone config.
+    if ! git -C "$target" fetch --quiet \
+        "https://x-access-token:${tok}@github.com/${slug}.git" \
+        '+refs/heads/*:refs/heads/*' 2>&1; then
+      echo "WARN: fetch failed on existing bare clone $target (continuing with potentially-stale refs)" >&2
+    fi
     continue
   fi
 
