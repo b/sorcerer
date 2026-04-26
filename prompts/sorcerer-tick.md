@@ -824,12 +824,12 @@ For each `active_wizards` entry with `mode: design` and `status: awaiting-tier-3
 
 Collect the candidate list across all designers.
 
-**Priority sort.** Before steps 9 and 10 apply the concurrency cap, sort candidates ascending by Linear `priority` so the limited spawn slots go to the most important work. For each unique `linear_id` in the candidate list, call `mcp__plugin_linear_linear__get_issue` with `id=<linear_id>` and read `priority.value` (Linear: `1`=Urgent, `2`=High, `3`=Medium, `4`=Low, `0`=None). Cache results within this tick — the same `linear_id` should not be fetched twice.
+**Priority sort.** Before steps 9 and 10 apply the concurrency cap, sort candidates ascending by Linear `priority` so the limited spawn slots go to the most important work. For each unique `linear_id` in the candidate list, call `mcp__plugin_linear_linear__get_issue` with `id=<linear_id>` and read both `priority.value` (Linear: `1`=Urgent, `2`=High, `3`=Medium, `4`=Low, `0`=None) and `createdAt` (ISO-8601 timestamp). Cache results within this tick — the same `linear_id` should not be fetched twice.
 
 Sort key per candidate:
 
 1. **Normalized priority** (ascending). Map `0` → `5` so unprioritized issues sort last; otherwise pass through. Result: Urgent (1) → High (2) → Medium (3) → Low (4) → None (5).
-2. **Manifest order** (ascending) as a stable tie-break for equal-priority candidates. Preserves the designer's intended ordering within a priority band.
+2. **Linear `createdAt`** (ascending — oldest first) as the tie-break for equal-priority candidates. Older issues have been waiting longer; within a priority band, draining the queue from the oldest end matches operator intuition. Manifest order is NOT a tie-break — a newer designer's manifest writes newer Linear issues first, which would otherwise let recently-filed work jump the queue ahead of older same-priority work that's been waiting across many ticks.
 
 If the Linear MCP is in needs-auth state on this tick (any `get_issue` call returns a needs-auth error), fall back to the un-sorted (manifest-order) candidate list and log `tick: priority-sort skipped — Linear MCP needs-auth`. Do NOT escalate — degrading to FIFO is acceptable; the next tick will re-sort once auth is restored. The sort is best-effort and never blocks dispatch.
 
