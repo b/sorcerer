@@ -907,13 +907,24 @@ For each `active_wizards` entry with `mode: design` and `status: awaiting-tier-3
 
 1. Read its `manifest_file` (`.sorcerer/wizards/<designer-id>/manifest.json`). Parse `issues` (list of `{linear_id, issue_key, repos, merge_order?, depends_on?}`).
 2. For each issue, check if there's already an `active_wizards` entry with `mode: implement` and `issue_linear_id` matching this issue. If yes, skip (already scheduled or running or done).
-3. **Dependency check.** If the issue has a non-empty `depends_on` list (other `linear_id` or `issue_key` values), verify every dependency is merged before scheduling:
-   - For each `dep` in `depends_on`:
-     - Find the corresponding entry in `active_wizards` (match by `issue_linear_id` or `issue_key` — the manifest may use either).
-     - If not found: look across OTHER designers' manifests (cross-sub-epic dependencies from the architect plan).
-     - If still not found: the dep is outside sorcerer's tracking — treat it as unsatisfied (log `tick: deferring <issue_key> — dep <dep> not found in any manifest`, consider escalating if this persists >3 ticks).
-     - If found but `status` is NOT one of `merged`, `done`, `archived`: dep is unsatisfied. Skip this issue (defer to next tick). Log: `tick: deferring <issue_key> — dep <dep_key> still <status>`.
-   - Only candidates with ALL deps in a merged/done/archived state proceed.
+3. **Dependency check (Linear ground truth, slice 61).** If the issue has a non-empty `depends_on` list, verify every dependency is **`statusType: completed` (Done) or `canceled` (won't happen) in Linear** before scheduling. Linear is the source of truth — sorcerer's internal `active_wizards` lookup was unreliable (a dep that lived in another designer's manifest but had no implement entry yet looked "found but unstatused" to the LLM, which interpreted it as satisfied — the 2026-04-27 SOR-395/396 re-spawn-and-re-fail loop, where SOR-441 was planned-but-not-yet-implemented and the wizards spawned anyway).
+
+   For each `dep` in `depends_on`:
+   - Call `mcp__plugin_linear_linear__get_issue` with `id=<dep>`. Cache the result within this tick — the same `dep` may appear across multiple candidates' `depends_on` lists; one call covers it.
+   - If the call errors or returns nothing: treat the dep as **unsatisfied** (do not assume satisfied on missing data). Log `tick: deferring <issue_key> — dep <dep> Linear lookup failed`.
+   - Examine `statusType`:
+     - `completed` → satisfied (the dep's implement merged and Linear was flipped to Done; either by the wizard's step-13 push or slice 49's reconciliation sweep).
+     - `canceled` → satisfied (the dep won't happen; don't block on it forever).
+     - `backlog`, `unstarted`, `started`, `triage` → **unsatisfied**. Skip this issue (defer to next tick). Log: `tick: deferring <issue_key> — dep <dep> still <statusType>`.
+   - Only candidates with ALL deps in `completed` or `canceled` state proceed to the candidate list.
+
+   **Linear MCP unavailable fallback.** If any `get_issue` call returns the needs-auth error (and the Linear MCP isn't reachable this tick), fall back to the older active_wizards/manifest-based check for THIS tick only:
+   - Find the dep in `active_wizards` (by `issue_linear_id` or `issue_key`); if status ∈ {merged, done, archived} → satisfied.
+   - If not found in active_wizards but found in some manifest → **unsatisfied** (planned but not yet active; the prior bug treated this as satisfied). Skip.
+   - If not found anywhere → **unsatisfied** (outside sorcerer's tracking). Skip.
+   Log `tick: dep-check fell back to active_wizards lookup — Linear MCP needs-auth` once per tick.
+
+   The Linear-ground-truth path is mandatory when the MCP is healthy. Do NOT skip the get_issue calls "for cost" — they're the same calls the priority sort already makes (cached in the same per-tick cache), and they're the only way to keep dep-checking correct as wizards transition through running → merging → merged → archived.
 4. Otherwise (no deps, or all deps satisfied), the issue is a candidate to spawn implementing.
 
 Collect the candidate list across all designers.
