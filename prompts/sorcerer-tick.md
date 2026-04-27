@@ -1365,6 +1365,36 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
 
    The `criterion_verdicts` and `reviewer_observations` arrays plus the anti-pattern check results are consumed by step 6a's audit comment (merge path) and step 6b's refer-back concerns list (refer-back path). Hold all three in memory until the chosen path is complete.
 
+   ### Stage 6.6 — Second-opinion review (only when first decision == merge)
+
+   Cluster 2 of the audit, deeper. The first reviewer's `merge` decision is the only one that ships code without further oversight. Refer-back / escalate paths give the wizard another cycle of work. Merge is irreversible. So merge alone gets a blind second opinion: a fresh `claude -p` reviewer that re-runs Stages 6.1 through 6.5 from scratch, sees the same primary sources (diff + issue + design docs + project rules), and is **NOT shown the first reviewer's verdicts**. If they converge on `merge`, the merge proceeds. If they diverge, the wizard refers back with the second reviewer's concerns appended.
+
+   This stage runs ONLY when the first decision is `merge`. For `refer-back` or `escalate`, skip 6.6 (the wizard already gets another cycle).
+
+   **Procedure:**
+
+   1. Build the args. From the in-memory state for this wizard entry: `issue_key`, `issue_linear_id`, `pr_urls` (JSON object), `branch_name`, `repos` (JSON array).
+   2. Invoke the second-opinion script:
+      ```bash
+      bash scripts/second-opinion-review.sh \
+        --issue-key "<SOR-N>" \
+        --issue-linear-id "<linear-uuid>" \
+        --pr-urls '<{"owner/repo":"<url>",...}>' \
+        --branch-name "<branch>" \
+        --repos '["github.com/owner/repo",...]' \
+        --project-root "$(pwd)"
+      ```
+      The script picks a non-throttled provider that's NOT this tick's `SORCERER_ACTIVE_PROVIDER` when one exists (different account → independent rate-limit history → less aligned bias), runs the second reviewer with read-only permission, and returns a JSON verdict on stdout.
+   3. Parse the script's stdout as JSON. Read `decision`.
+   4. **Compare:**
+      - **Both `merge`** → second opinion concurs. Proceed to step 6a unchanged. Append `{"ts":"...","event":"second-opinion-concur","id":"<wizard-id>","issue_key":"<SOR-N>","provider":"<picked-provider>"}` to events.log.
+      - **First `merge`, second `refer-back` OR `escalate`** → second opinion diverges. Treat as **refer-back** with concern `Second-opinion review disagreement: <second.summary>`. Merge the second reviewer's `criterion_verdicts` (only the `not_verified` entries) into the first reviewer's array; merge `reviewer_observations` with `disposition: fix` from second into first. Append `{"ts":"...","event":"second-opinion-diverge","id":"<wizard-id>","issue_key":"<SOR-N>","first_decision":"merge","second_decision":"<refer-back|escalate>","provider":"<picked>"}` to events.log. Proceed to step 6b instead of 6a.
+   5. **If the second-opinion script fails** (non-zero exit, no parseable JSON output): log `tick: second-opinion failed for <SOR-N>; proceeding with first opinion` and proceed to step 6a as if 6.6 didn't exist. Do NOT block the merge — a hung second opinion would freeze every merge across the whole project. The script's 25-minute hard cap and provider-selection logic make this rare; an escalation isn't warranted on transient failures, but two consecutive failures on the same wizard MUST escalate with `rule: second-opinion-persistent-failure` (track via a `second_opinion_fail_count` field on the entry, increment on failure, reset on success).
+
+   **Cost.** Doubles review LLM cost on the merge path only. Refer-back / escalate paths are unchanged. Empirically: most ticks have 0 merging wizards; merging waves cluster after CI completion. The cap on second-opinion divergence (refer-back) is the existing `max_refer_back_cycles`.
+
+   **Why blind.** If the second reviewer sees the first's verdict, they anchor to it — the LLM's natural bias is toward consensus. The whole point of the second opinion is to catch blind spots the first reviewer's framing missed. The script enforces blindness: the prompt explicitly instructs not to read prior review notes, and the script does not pass them as inputs.
+
 6a. **Merge action** (only when decision == merge):
    - **Pre-merge re-verification (mandatory, belt-and-suspenders).** The decision was made on data fetched at the top of step 12; a check could have flipped red in the meantime. For each PR in the set, re-fetch and confirm ALL of:
      - `state == "OPEN"` (someone didn't close/merge it externally)
