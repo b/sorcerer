@@ -1276,6 +1276,33 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
 
    Preserve criterion order from the issue body. If the issue has no `Acceptance criteria` section or no `- [ ]` lines, set `criterion_verdicts = []` and note it in stage 6.5's audit notes.
 
+   ### Stage 6.4.5 — Executable AC verification (citation-existence + test-asserts-criterion)
+
+   The stage-6.4 verdicts make the wizard *write* a citation. They do not check that the cited test-fn exists, that it asserts the claimed behavior, or that the cited file:line implements what the criterion says. The 2026-04-26 absent-functionality audit (13 placeholders shipped through the gate) is the canonical case: every placeholder PR had verdicts whose prose looked plausible because the LLM reviewer was reasoning from the citation text, not from the cited code.
+
+   This stage MUST run after stage 6.4 produces verdicts and before stage 6.5 starts. For each verdict with `verdict == "verified"`:
+
+   1. **Parse the citation.** From `reason`, extract:
+      - The cited `file:line` of the implementation (form: `<path>:<line>`).
+      - The cited test-fn (form: `<test-file>::<fn-name>` or `<test-file>::<module>::<fn-name>`).
+
+      If the verdict cites neither (e.g. it's a vendoring criterion satisfied by a `VENDOR_REV` pin with `cargo build` evidence), skip 6.4.5 for this verdict — the stage 6.3 anti-pattern check already covered that shape. Note the skip in your working memory.
+
+   2. **Citation-existence check (mechanical, mandatory).**
+      - Run `grep -nE "<fn-name>" <test-file>` from the **wizard's worktree** if it still exists, or from the bare clone at the PR's HEAD via `git -C <bare> show <branch>:<test-file> | grep -nE "<fn-name>"`. If the function definition isn't present (no `fn <fn-name>` / `#[test]\nfn <fn-name>` / equivalent for the language), the citation is **fictitious** — flip this verdict to `not_verified` with `reason: "Stage 6.4.5: cited test-fn <fn-name> does not exist in <test-file> at PR HEAD."` Do the same check on the cited implementation file:line — if line N of the path doesn't exist (file too short, or path absent), flip to `not_verified` with `reason: "Stage 6.4.5: cited implementation file:line <path>:<line> not present at PR HEAD."`
+      - The CI status `statusCheckRollup == "SUCCESS"` from step 12's pre-merge re-verification confirms the test was *executed and passed*; the citation-existence check confirms the test was *what the wizard claimed*. Together they demonstrate the cited evidence is real.
+
+   3. **Test-asserts-criterion check (LLM judgment, focused).** Read the test-fn's body (use Read on the cited file at the cited line range, or `git show <branch>:<test-file>`). Hold the criterion text in scope and ask: *do the assertions in this test body, on the inputs they exercise, demonstrate the criterion?* Examples:
+      - Criterion: "Drop on Handle releases the underlying refcount". Test asserts `assert_eq!(refcount_after_drop(), 0)` after a `drop(handle)`. PASS — the test directly exercises the claim.
+      - Criterion: "Drop on Handle releases the underlying refcount". Test asserts `assert!(matches!(handle, Handle::_))`. FAIL — type-pattern check, doesn't exercise drop semantics.
+      - Criterion: "Per-criterion verdicts written to Linear comment after merge". Test mocks Linear API and asserts the mock was called. PASS — the test exercises the integration the criterion describes.
+
+      If the test body fails this check, flip the verdict to `not_verified` with `reason: "Stage 6.4.5: cited test <fn-name> exists but does not assert the criterion. Asserts: <one-sentence summary of what the test actually checks>. Criterion expected: <criterion text>."` Be specific in the rationale — the next-cycle wizard reads this to understand what to add.
+
+   4. **State the result explicitly.** After processing every `verified` verdict, log `Stage 6.4.5: <K>/<N> verdicts pass executable verification; <FLIPPED> flipped to not_verified.` to your working notes. If `FLIPPED > 0`, those verdicts feed into stage 6.5's open-ended pass and into the decision logic — they force refer-back via the existing rule (any `not_verified` triggers refer-back).
+
+   This stage **never runs against `not_applicable` or `not_verified` verdicts** — it only validates the wizard's positive claims. The cost is one or two grep / Read operations per `verified` verdict, plus one focused LLM judgment per cited test body. Cheap relative to the cost of merging a placeholder.
+
    ### Stage 6.5 — Senior-reviewer push-back pass
 
    **Mandatory pre-check: deferred-work comments must cite a tracking SOR identifier.** Every TODO / placeholder / deferred-work comment in production code must be rooted to a Linear issue so the deferred work is mechanically discoverable. "Documented but untracked" is the failure mode this pre-check exists to refuse — a wizard that honestly self-documents a placeholder in a module doc still ships untracked deferred work if no SOR-NNN appears in the comment.
@@ -1299,7 +1326,7 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
 
    This pre-check is **mandatory** and runs **before** the open-ended pass below — it does not replace it. State the result explicitly: either "0 deferred-work comments without SOR identifier" or the list of fix-disposition entries it produced.
 
-   **Open-ended pass.** After the structured walkthrough + anti-pattern check + per-criterion verdicts + deferred-work pre-check, ask: **what would a senior engineer flag in code review that the structured passes missed?**
+   **Open-ended pass.** After the structured walkthrough + anti-pattern check + per-criterion verdicts + executable AC verification (6.4.5) + deferred-work pre-check, ask: **what would a senior engineer flag in code review that the structured passes missed?**
 
    Categories to consider (non-exhaustive):
 
