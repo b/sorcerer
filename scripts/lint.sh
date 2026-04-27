@@ -35,4 +35,16 @@ for f in "${scripts[@]}"; do
 done
 
 echo "summary: $pass passed, $fail failed"
-[[ "$fail" -eq 0 ]]
+shellcheck_failed=$fail
+
+# Slice 58 — prompt linter (hedged-mandatory phrasing). Independent pass; both
+# must succeed for `lint.sh` to exit clean.
+echo
+echo "=== prompts/*.md (lint-prompts.sh) ==="
+prompt_lint_rc=0
+bash "$REPO_ROOT/scripts/lint-prompts.sh" || prompt_lint_rc=$?
+
+if (( shellcheck_failed == 0 && prompt_lint_rc == 0 )); then
+  exit 0
+fi
+exit 1
