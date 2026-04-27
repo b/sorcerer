@@ -182,6 +182,70 @@ printf '{"ts":"%s","event":"pr-set-recovered","id":"%s","issue_key":"%s","pr_cou
 
 This is only applicable to `mode: implement | feedback | rebase` wizards — the ones that have `branch_name` + `repos` + `state_dir` fields. Architect and designer wizards produce plan/manifest files locally and don't have a PR fallback, so they stay on the original failed/respawn path.
 
+## Failed-wizard WIP preservation (for implement / feedback / rebase wizards)
+
+When PR-set recovery returns nothing and the entry is about to transition to `status: failed`, the wizard's worktree may still hold uncommitted work — the SOR-381 case: an implement that finished its diff in-tree but couldn't run the workspace gates (host disk full) and reported `IMPLEMENT_FAILED` without committing. The default cleanup path destroys that diff. This procedure preserves it as a `wip/<wizard-id>` branch on GitHub before any cleanup runs, so an operator (or a future re-spawn) can recover the work or audit what the wizard actually produced.
+
+**MUST run on every transition to `status: failed`** for `mode in {implement, feedback, rebase}` BEFORE any cleanup or `status` write. Side-effects are best-effort (a push that fails for auth/network reasons shouldn't block the failed transition), but the attempt is mandatory — a wizard whose `wip_branch` field is missing on a failed entry MUST have had this procedure attempted.
+
+**Helper:**
+
+```bash
+# Commit + push uncommitted worktree contents to wip/<wizard-id> on GitHub.
+# Returns 0 on push success, 1 on any failure. Always idempotent — safe to
+# call twice; the second call no-ops if there's nothing new to commit.
+preserve_wizard_wip() {
+  local wizard_id="$1" issue_key="$2"
+  local worktree="$3"   # one repo's worktree path; iterate from caller for multi-repo
+  local repo_slug="$4"  # owner/name (no github.com/ prefix)
+  [[ -d "$worktree" ]] || return 1
+
+  # Mint a token for the repo's owner so the push has write.
+  local owner="${repo_slug%/*}"
+  local out
+  if ! out=$(GH_APP_INSTALLATION_ID= bash "$SORCERER_REPO/scripts/refresh-token.sh" \
+        --installation-owner "$owner" 2>/dev/null); then
+    return 1
+  fi
+  eval "$out"
+
+  # Stage everything (including untracked + deletions); commit if there's anything to record.
+  git -C "$worktree" add -A 2>/dev/null || return 1
+  if ! git -C "$worktree" diff --cached --quiet 2>/dev/null; then
+    git -C "$worktree" \
+        -c "user.email=sorcerer@noreply" \
+        -c "user.name=sorcerer" \
+        commit --no-verify -m "WIP: ${wizard_id} ${issue_key} (auto-preserved on failed transition)" \
+        >/dev/null 2>&1 || return 1
+  fi
+
+  # Push to wip/<wizard-id>. Force-push because re-failures may overwrite an
+  # earlier WIP for the same wizard id — the most recent state is what matters.
+  local wip_branch="wip/${wizard_id}"
+  if ! git -C "$worktree" push --force \
+        "https://x-access-token:${GITHUB_TOKEN}@github.com/${repo_slug}.git" \
+        "HEAD:refs/heads/${wip_branch}" >/dev/null 2>&1; then
+    return 1
+  fi
+  return 0
+}
+```
+
+**Procedure** (called from each transition-to-failed site for implement/feedback/rebase wizards):
+
+1. For each `(repo_slug, worktree_path)` in the entry's `repos` × `worktree_paths`:
+   - Call `preserve_wizard_wip <wizard_id> <issue_key> <worktree_path> <repo_slug>`.
+   - On success: record `repo_slug` in a local `wip_pushed` array.
+   - On failure: log `tick: wip-preserve failed for <wizard_id> on <repo_slug>; continuing` to stdout. Do NOT block the failed transition — degraded preservation is better than a hung tick.
+2. Set `wip_branch: "wip/<wizard_id>"` on the entry (regardless of push success — operators looking at the entry know to check the branch).
+3. Append to `.sorcerer/events.log`:
+   ```json
+   {"ts":"...","event":"wizard-wip-preserved","id":"<wizard-id>","issue_key":"<SOR-N>","mode":"<mode>","wip_branch":"wip/<wizard-id>","repos_pushed":["<repo_slug>",...],"repos_failed":["<repo_slug>",...]}
+   ```
+4. Then proceed with the existing `status: failed` write + escalation as the calling site already specifies.
+
+This procedure is **only applicable to `mode: implement | feedback | rebase`** — architect / designer / reviewer wizards have no worktree to preserve.
+
 ## Rate-limit (429) and overload (529) handling
 
 Every wizard spawn is a `claude -p` subprocess. When Anthropic throttles or its servers are overloaded, claude auto-retries internally; if it still can't get through, it exits non-zero. Two distinct failure modes with different recovery:
@@ -206,7 +270,7 @@ is_overloaded_log() {
 1. Mark the wizard entry `status: throttled`, `retry_after: <now + 60s>`. Shorter than 429's 5-min default — 529 typically clears fast.
 2. Increment a dedicated `overload_count` on the entry (initialize to 0). Do NOT increment `throttle_count` (that's for 429 strikes).
 3. **Do NOT touch `providers_state`** — the provider isn't the problem, the upstream service is.
-4. `overload_count >= 15` → this is an Anthropic status-page issue, not something recovery cycles will fix. Escalate with `rule: persistent-server-overload` and set the wizard `status: failed`. Point the user at https://status.claude.com in `needs_from_user`.
+4. `overload_count >= 15` → this is an Anthropic status-page issue, not something recovery cycles will fix. For `mode in {implement, feedback, rebase}`: run **Failed-wizard WIP preservation** (above) BEFORE the status write. Then escalate with `rule: persistent-server-overload` and set the wizard `status: failed`. Point the user at https://status.claude.com in `needs_from_user`.
 5. Append to events.log:
    ```json
    {"ts":"...","event":"wizard-overloaded","id":"<id>","mode":"<mode>","retry_after":"<ISO-8601>","overload_count":<N>}
@@ -284,7 +348,7 @@ If 429 detected:
    ```json
    {"ts":"...","event":"provider-throttled","provider":"<P>","throttled_until":"<ISO-8601>"}
    ```
-4. If `throttle_count >= 3` on the WIZARD entry: escalate with `rule: persistent-throttle`, `mode: <mode>`, `issue_key: <SOR-N or null>`, and set `status: failed`. The 3-strike rule is per-wizard, not per-provider — a provider that throttles many different wizards is working as intended (cycling kicks in). A single wizard that throttles three times across all providers suggests something deeper.
+4. If `throttle_count >= 3` on the WIZARD entry: for `mode in {implement, feedback, rebase}` run **Failed-wizard WIP preservation** (above) BEFORE the status write. Then escalate with `rule: persistent-throttle`, `mode: <mode>`, `issue_key: <SOR-N or null>`, and set `status: failed`. The 3-strike rule is per-wizard, not per-provider — a provider that throttles many different wizards is working as intended (cycling kicks in). A single wizard that throttles three times across all providers suggests something deeper.
 5. Append `{"ts":"...","event":"wizard-throttled","id":"<id>","mode":"<mode>","provider":"<P or null>","retry_after":"<ISO-8601>","throttle_count":<N>}` to events.log.
 
 **Provider cycling (strict primary → fallback)**: when the tick spawns a wizard, `scripts/spawn-wizard.sh` automatically picks the first provider in `config.providers` whose `providers_state[name].throttled_until` is null or in the past. The tick itself doesn't need to choose — just rely on the spawn script. Rotation happens on the next spawn; the current wizard finishes (or throttles again) first.
@@ -608,13 +672,13 @@ Cases:
     ```
   - Update entry: `status: awaiting-review` (step 12 will re-evaluate the PR set next tick). Leave `pr_urls` as-is.
 - `hb=absent` AND `last_line` starts with `IMPLEMENT_FAILED`, `FEEDBACK_FAILED`, or `REBASE_FAILED`:
-  - Wizard reported its own failure. Update `status: failed`. Append to `.sorcerer/escalations.log` with `rule: <implement|feedback|rebase>-self-reported-failure`, include the wizard's failure reason.
+  - Wizard reported its own failure. Run **Failed-wizard WIP preservation** (above) BEFORE the status write — the wizard's worktree may hold uncommitted work (the canonical SOR-381 case: `IMPLEMENT_FAILED: host disk full`, real diff in-tree, never committed). Then update `status: failed`. Append to `.sorcerer/escalations.log` with `rule: <implement|feedback|rebase>-self-reported-failure`, include the wizard's failure reason and the `wip_branch` value.
 - `hb=absent` AND `pr=absent` AND no completion marker in log:
   - If `now - started_at < 30s`, too early — skip.
   - Otherwise: **run overload detection first** (see "Rate-limit (429) and overload (529) handling" above). If `is_overloaded_log` matches, follow the 529 path (wizard throttled 60s, NO provider-state change).
   - Then **rate-limit detection**. If `is_rate_limited_log` matches, follow the 429 throttle path (wizard + provider throttled).
   - Next: **run the PR-set recovery check** (see "PR-set recovery" above). Call `discover_pr_set <branch_name> <repos…>`. If it returns a complete pr_urls map, the wizard completed durably even though it didn't write `pr_urls.json` — write it now, set `status: awaiting-review`, set the entry's `pr_urls` to the discovered map, append a `pr-set-recovered` event with `source: "step5c"`. Do NOT mark failed, do NOT escalate. The next tick's step 12 will evaluate the set normally.
-  - Only if neither 529 nor 429 was detected AND recovery found no PR set: crashed without writing output. `status: failed`. Append to `.sorcerer/escalations.log` with `rule: implement-no-output` (or `feedback-no-output`, `rebase-no-output`).
+  - Only if neither 529 nor 429 was detected AND recovery found no PR set: crashed without writing output. Run **Failed-wizard WIP preservation** (above) BEFORE the status write. Then `status: failed`. Append to `.sorcerer/escalations.log` with `rule: implement-no-output` (or `feedback-no-output`, `rebase-no-output`) and the `wip_branch` value.
 - `pr=present, hb=present` — wizard mid-write; wait for next tick.
 - `hb=present` — wizard still working; step 11c handles staleness.
 
@@ -1056,7 +1120,7 @@ mtime=$(stat -c %Y <state_dir>/heartbeat 2>/dev/null)
       echo $!
       ```
       Capture new pid. Append `implement-stale-respawn` event.
-    - `respawn_count >= 1`: `status: failed`. Append to `.sorcerer/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: implement`, `issue_key: <SOR-N>`.
+    - `respawn_count >= 1`: run **Failed-wizard WIP preservation** (above) BEFORE the status write. Then `status: failed`. Append to `.sorcerer/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: implement`, `issue_key: <SOR-N>`, and the `wip_branch` value.
 
 ### Step 12 — PR-set review and merge
 
