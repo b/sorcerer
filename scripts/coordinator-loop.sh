@@ -159,10 +159,51 @@ has_in_flight_work() {
 
 echo "[$(ts)] coordinator-loop started (pid $$) for $PROJECT_ROOT"
 
+# Slice 56 — run the doctor's live-state checks at boot. Failures here are
+# logged + escalated but do NOT stop the loop: degraded operation (some live
+# checks failing) is preferable to silent stoppage. The first periodic
+# re-run happens after DOCTOR_EVERY ticks.
+DOCTOR_EVERY=30
+TICK_COUNT=0
+
+run_live_doctor() {
+  local label="$1" rc=0
+  echo "[$(ts)] doctor.sh --live-only ($label)"
+  bash "$SORCERER_REPO/scripts/doctor.sh" --live-only "$PROJECT_ROOT" > "$STATE/last-doctor.log" 2>&1 || rc=$?
+  if (( rc != 0 )); then
+    # Echo the FAIL/WARN lines into coordinator.log so they're visible in
+    # /sorcerer status without having to open last-doctor.log.
+    grep -E '^\s*(FAIL|WARN)' "$STATE/last-doctor.log" 2>/dev/null | head -20 | while IFS= read -r ln; do
+      echo "[$(ts)] doctor: $ln"
+    done
+    # One escalation per doctor failure; coord doesn't stack these (they tend
+    # to repeat across many ticks until the operator acts).
+    jq -nc \
+      --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg rule "doctor-live-check-failed" \
+      --arg label "$label" \
+      --arg attempted "doctor.sh --live-only returned $rc; see $STATE/last-doctor.log for details" \
+      --arg needs_from_user "Read $STATE/last-doctor.log; remediate the FAIL items. Coord continues running in degraded mode." \
+      '{ts:$ts, wizard_id:null, mode:"coordinator", issue_key:null, pr_urls:null, rule:$rule, attempted:$attempted, needs_from_user:$needs_from_user, label:$label, log_path:$ENV.STATE+"/last-doctor.log"}' \
+      >> "$STATE/escalations.log"
+  fi
+  return 0   # never propagate
+}
+
+STATE=".sorcerer"  # reused inside run_live_doctor for the escalation jq
+mkdir -p "$STATE"
+run_live_doctor "boot"
+
 while true; do
   if ! has_in_flight_work; then
     echo "[$(ts)] no in-flight work; exiting"
     exit 0
+  fi
+
+  # Periodic doctor (slice 56). DOCTOR_EVERY ticks between live-only runs.
+  TICK_COUNT=$((TICK_COUNT + 1))
+  if (( TICK_COUNT % DOCTOR_EVERY == 0 )); then
+    run_live_doctor "periodic-tick-$TICK_COUNT"
   fi
 
   # Honor a global pause set by the tick when too many rate-limit (429) errors

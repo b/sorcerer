@@ -2,12 +2,31 @@
 # Sorcerer preflight check for a project. Exits 0 if everything required is
 # in place; non-zero on any failure.
 #
-# Usage: scripts/doctor.sh [<project-root>]
+# Usage: scripts/doctor.sh [--live-only] [<project-root>]
 #
-# If <project-root> is omitted, uses cwd. Checks the project's .sorcerer/
-# layout (config.json, bare clones, state/ writable) plus user-level
-# prerequisites (CLI tools, Linear MCP, GitHub App env, Anthropic CLI).
+# If <project-root> is omitted, uses cwd. Default mode checks both static
+# prerequisites (CLI tools, env vars, GitHub App config, Anthropic CLI) and
+# live state (MCP under `claude -p`, sorcerer.json sanity, worktree-vs-state,
+# bare-clone freshness, disk floor).
+#
+# `--live-only` skips the static checks — intended for `coordinator-loop.sh`
+# to run periodically without re-paying the static-check cost on every Nth
+# tick. Live checks are the things that change at runtime; static checks
+# only need to pass once per coord boot (slice 56).
 set -o pipefail   # intentionally NOT -u: associative arrays misbehave with set -u across empty states
+
+LIVE_ONLY=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --live-only) LIVE_ONLY=1; shift ;;
+    --help|-h)
+      sed -n '2,15p' "$0" | sed 's/^# \?//'
+      exit 0
+      ;;
+    -*) echo "ERROR: unknown flag: $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
 
 PROJECT_ROOT="${1:-$(pwd)}"
 [[ -d "$PROJECT_ROOT" ]] || { echo "ERROR: project root not a directory: $PROJECT_ROOT" >&2; exit 1; }
@@ -45,7 +64,9 @@ check_cmd() {
   fi
 }
 
-echo "sorcerer doctor for: $PROJECT_ROOT"
+echo "sorcerer doctor for: $PROJECT_ROOT (mode: $([[ "$LIVE_ONLY" == "1" ]] && echo live-only || echo full))"
+
+if [[ "$LIVE_ONLY" == "0" ]]; then
 
 # === CLI tools ===
 section "CLI tools"
@@ -285,6 +306,189 @@ if command -v claude >/dev/null 2>&1 && claude --version >/dev/null 2>&1; then
   ok "claude CLI installed ($(claude --version 2>/dev/null | head -1))"
 else
   no "claude CLI missing or broken"
+fi
+
+fi  # end LIVE_ONLY guard for static checks
+
+# ============================================================================
+# Live state checks — always run. These check things that change at runtime
+# and that a long-running coord-loop needs to re-verify periodically.
+# ============================================================================
+
+# === Linear MCP under `claude -p` ===
+# `claude mcp list` (the static check above) reports the plugin's connection
+# state in the interactive context. It does NOT verify that `claude -p`
+# subprocesses (the form the coord uses) can actually see the plugin's tools.
+# These can diverge — see the 2026-04-26 incident where
+# ~/.claude/plugins/known_marketplaces.json was zeroed: interactive sessions
+# stayed working from in-memory cache, but every `claude -p` invocation lost
+# the Linear MCP tools and the coord stalled for hours.
+section "Linear MCP available to claude -p (subprocess context)"
+if command -v claude >/dev/null 2>&1; then
+  if mcp_out=$(timeout 30 claude -p --output-format text \
+        "List the names of any mcp__plugin_linear_linear tools you have available. Just the names, no commentary." 2>&1); then
+    if grep -q "mcp__plugin_linear_linear__get_issue" <<<"$mcp_out"; then
+      ok "Linear MCP visible to claude -p (mcp__plugin_linear_linear__get_issue resolves)"
+    else
+      no "Linear MCP NOT visible to claude -p — coord ticks will silently skip Linear-dependent steps. Likely cause: ~/.claude/plugins/known_marketplaces.json corrupt/zeroed. Remediation: delete the file and run /plugin in an interactive Claude Code session to let it rebuild."
+    fi
+  else
+    warn "claude -p subprocess timed out or errored during MCP probe; check coord-side claude auth"
+  fi
+else
+  warn "skipped — claude CLI not on PATH"
+fi
+
+# === sorcerer.json sanity ===
+section "sorcerer.json state sanity"
+if [[ -f "$STATE/sorcerer.json" ]]; then
+  if jq -e . "$STATE/sorcerer.json" >/dev/null 2>&1; then
+    ok "sorcerer.json parses as JSON"
+
+    # active_wizards[*].state_dir must exist on disk
+    missing_state_dirs=$(jq -r '
+      (.active_wizards // [])[] |
+      select(.state_dir != null and (.status | IN("running","throttled","awaiting-review","merging","awaiting-tier-3","awaiting-design-review","design-review-running") )) |
+      "\(.id)\t\(.state_dir)"
+    ' "$STATE/sorcerer.json" | while IFS=$'\t' read -r wid sdir; do
+      [[ -z "$sdir" ]] && continue
+      [[ -d "$sdir" ]] || echo "$wid:$sdir"
+    done)
+    if [[ -z "$missing_state_dirs" ]]; then
+      ok "all live-status wizards have on-disk state_dirs"
+    else
+      no "wizards with live status but missing state_dir — likely stripped externally:"
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        printf "          %s\n" "$line"
+      done <<<"$missing_state_dirs"
+    fi
+
+    # active_wizards[*].pid must be alive when status is `running`
+    dead_pids=$(jq -r '
+      (.active_wizards // [])[] |
+      select(.status == "running" and .pid != null) |
+      "\(.id)\t\(.pid)\t\(.issue_key // "n/a")"
+    ' "$STATE/sorcerer.json" | while IFS=$'\t' read -r wid pid issue; do
+      [[ -z "$pid" || "$pid" == "null" ]] && continue
+      kill -0 "$pid" 2>/dev/null || echo "$wid pid=$pid issue=$issue"
+    done)
+    if [[ -z "$dead_pids" ]]; then
+      ok "all running wizards have live pids"
+    else
+      no "wizards in status:running with dead pids (heartbeat-poll will respawn or fail them on next tick):"
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        printf "          %s\n" "$line"
+      done <<<"$dead_pids"
+    fi
+
+    # No duplicate (issue_key, mode) pairs for non-archived statuses — the
+    # SOR-315 dup-spawn shape that escalation #13 caught.
+    dup_pairs=$(jq -r '
+      (.active_wizards // [])[] |
+      select(.issue_key != null and (.status | IN("running","throttled","awaiting-review","merging","needs-merge"))) |
+      "\(.mode)\t\(.issue_key)"
+    ' "$STATE/sorcerer.json" | sort | uniq -d)
+    if [[ -z "$dup_pairs" ]]; then
+      ok "no duplicate (mode, issue_key) pairs in live statuses"
+    else
+      no "duplicate (mode, issue_key) pairs in live statuses (race / split-brain artifact):"
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        printf "          %s\n" "$line"
+      done <<<"$dup_pairs"
+    fi
+  else
+    no "$STATE/sorcerer.json is not valid JSON"
+  fi
+else
+  warn "$STATE/sorcerer.json not present yet (first /sorcerer call hasn't bootstrapped state)"
+fi
+
+# === Worktree-vs-state reconciliation ===
+# Every git worktree registered against a bare clone should belong to a wizard
+# entry that's still in a non-terminal state. Worktrees registered for merged
+# / failed / archived wizards are leaks (slice 51's coord-restart sweep
+# doesn't catch these — it sweeps coord processes, not git worktrees).
+section "Worktree-vs-state reconciliation"
+if [[ -d "$STATE/repos" ]]; then
+  ghost_worktrees=""
+  for bare in "$STATE/repos"/*/; do
+    [[ -d "$bare" ]] || continue
+    while IFS= read -r line; do
+      [[ "$line" =~ ^worktree[[:space:]](.+)$ ]] || continue
+      wt_path="${BASH_REMATCH[1]}"
+      # Skip the bare clone itself
+      [[ "$wt_path" == "${bare%/}" ]] && continue
+      # Extract wizard-id from path: .../wizards/<wizard-id>/issues/<issue-key>/trees/...
+      if [[ "$wt_path" =~ /wizards/([0-9a-f-]+)/issues/([^/]+)/trees/ ]]; then
+        wzid="${BASH_REMATCH[1]}"
+        ikey="${BASH_REMATCH[2]}"
+        if [[ -f "$STATE/sorcerer.json" ]]; then
+          status=$(jq -r --arg id "$wzid" '
+            (.active_wizards // [])[] | select(.id == $id) | .status
+          ' "$STATE/sorcerer.json" 2>/dev/null)
+          if [[ -z "$status" ]]; then
+            ghost_worktrees+="  no-such-wizard $wzid ($ikey): $wt_path"$'\n'
+          elif [[ "$status" == "merged" || "$status" == "failed" || "$status" == "archived" ]]; then
+            ghost_worktrees+="  status=$status $wzid ($ikey): $wt_path"$'\n'
+          fi
+        fi
+      fi
+    done < <(git -C "$bare" worktree list --porcelain 2>/dev/null)
+  done
+  if [[ -z "$ghost_worktrees" ]]; then
+    ok "no ghost worktrees (every registered worktree maps to a live wizard)"
+  else
+    no "ghost worktrees registered against bare clones (terminal-state wizards with un-cleaned worktrees):"
+    printf "%s" "$ghost_worktrees"
+    printf "          remediation: git -C <bare> worktree remove --force <path>\n"
+  fi
+else
+  warn "no bare clones yet — skipped worktree reconciliation"
+fi
+
+# === Bare-clone freshness ===
+# Slice 53 made `ensure-bare-clones.sh` fetch on every invocation. If a bare
+# clone's FETCH_HEAD is older than 6h, no spawn has happened recently and
+# someone reading `main` from this clone is reading stale code.
+section "Bare-clone freshness (FETCH_HEAD age)"
+if [[ -d "$STATE/repos" ]]; then
+  for bare in "$STATE/repos"/*/; do
+    [[ -d "$bare" ]] || continue
+    bare_name=$(basename "$bare")
+    if [[ -f "$bare/FETCH_HEAD" ]]; then
+      mtime=$(stat -c '%Y' "$bare/FETCH_HEAD" 2>/dev/null || stat -f '%m' "$bare/FETCH_HEAD" 2>/dev/null)
+      now=$(date +%s)
+      age=$(( now - mtime ))
+      age_h=$(( age / 3600 ))
+      if (( age < 21600 )); then
+        ok "$bare_name FETCH_HEAD age: ${age_h}h"
+      else
+        warn "$bare_name FETCH_HEAD age: ${age_h}h (stale — next ensure-bare-clones.sh call refreshes)"
+      fi
+    else
+      warn "$bare_name has no FETCH_HEAD (never fetched after clone)"
+    fi
+  done
+else
+  warn "no bare clones yet — skipped freshness check"
+fi
+
+# === Disk floor ===
+section "Disk floor (vs limits.disk_floor_gb)"
+floor_gb=40
+if [[ -f "$STATE/config.json" ]]; then
+  cfg_floor=$(jq -r '.limits.disk_floor_gb // 40' "$STATE/config.json" 2>/dev/null)
+  [[ "$cfg_floor" =~ ^[0-9]+$ ]] && floor_gb="$cfg_floor"
+fi
+avail_kb=$(df -Pk "$PROJECT_ROOT" | awk 'NR==2 {print $4}')
+avail_gb=$(( avail_kb / 1024 / 1024 ))
+if (( avail_gb >= floor_gb )); then
+  ok "disk free: ${avail_gb}G (floor: ${floor_gb}G)"
+else
+  no "disk free: ${avail_gb}G < floor ${floor_gb}G — slice 60's pre-flight will defer all spawns this tick"
 fi
 
 # === Summary ===
