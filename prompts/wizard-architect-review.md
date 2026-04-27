@@ -46,7 +46,16 @@ Walk these checks in order. For each defect found, either edit the file in place
 
 5. **Sizing sanity.** A 1-sub-epic plan for an obviously multi-component request → either (a) split it, if you can do so cleanly; (b) reject if the right decomposition isn't obvious. A 12-sub-epic plan for a single-file change → consolidate the over-split parts.
 
-6. **Non-defects.** Stylistic preferences, alternative decompositions you'd have chosen, or "could be tightened" prose are NOT defects. Don't edit for taste.
+6. **Referenced-but-excluded SOR-NNN MUST be tracked.** Grep `design.md` and `plan.json` (case-sensitive) for `SOR-\d+` mentions. For each cited SOR-NNN, classify it:
+   - **Owned** — the SOR appears as a target of some sub-epic's mandate (the sub-epic's mandate names files/behaviors that address it). PASS.
+   - **Excluded with deferral** — the design or a sub-epic explicitly defers the SOR to a future architect run with a rationale (e.g. `"deferred to a future architect run for archers-vi-acl"` with the actual reason). PASS.
+   - **Excluded as cancelled** — the SOR's Linear `statusType` is `canceled` (verify via `mcp__plugin_linear_linear__get_issue`). PASS.
+   - **Referenced but neither owned, deferred-with-rationale, nor cancelled** — FAIL. The architect cited the issue without committing to it. Two recovery paths:
+     1. **Edit-fix:** if the SOR fits one of the existing sub-epics' scope, add it as an explicit owned target in that sub-epic's mandate.
+     2. **Reject:** if the SOR represents work the existing sub-epics can't absorb without redrawing boundaries, reject — the architect needs to either add a sub-epic or explicitly defer with rationale. This is the SOR-407 shape (the canonical 2026-04-26 case: architect 3b064fe4 listed SOR-407 in "Does NOT own" with no follow-up plan, leaving it orphaned in Linear for hours).
+   Do this check AFTER checks 1-5 so any sub-epic edits you've made above are reflected in the "Owned" classification.
+
+7. **Non-defects.** Stylistic preferences, alternative decompositions you'd have chosen, or "could be tightened" prose are NOT defects. Don't edit for taste.
 
 When you edit `plan.json`, preserve the schema exactly. After every edit, re-validate with `jq . <subject_state_dir>/plan.json >/dev/null` (in a `bash -c`); if it fails, restore from your own in-memory copy of the prior version (use the Read tool to re-fetch what's on disk and Write the corrected version) — a malformed plan.json blocks every downstream wizard.
 
