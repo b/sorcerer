@@ -55,7 +55,16 @@ Walk these checks in order. For each defect found, either edit it (manifest file
 
 7. **Linear / manifest consistency.** Use `mcp__plugin_linear_linear__list_issues` filtered to the project to find issues that exist in Linear but aren't in the manifest, or vice versa. Reconcile by editing whichever side is wrong (usually: add the missing entry to `manifest.json` if Linear has it, or `save_issue` with `state="Cancelled"` if the manifest dropped it deliberately).
 
-8. **Non-defects.** Stylistic disagreements about issue titles, ordering preferences without dependency justification, or "could be tightened" prose are NOT defects. Don't edit for taste.
+8. **Referenced-but-excluded SOR-NNN MUST be tracked.** Grep `manifest.json` AND every issue body in the manifest (case-sensitive) for `SOR-\d+` mentions. For each cited SOR-NNN that is NOT itself a member of `manifest.issues`, classify:
+   - **Owned by another active manifest** — the SOR appears in some other designer's `manifest.issues` (cross-sub-epic dependency, already tracked elsewhere). PASS.
+   - **Cancelled** — the SOR's Linear `statusType` is `canceled` (verify via `mcp__plugin_linear_linear__get_issue`). PASS.
+   - **Done** — the SOR's Linear `statusType` is `completed` (already merged). PASS.
+   - **Excluded with deferral** — the manifest or an issue body explicitly defers the SOR with rationale (e.g. "tracked by future sub-epic X" or "intentionally out of scope per ADR-NNN"). PASS.
+   - **Otherwise** — FAIL. The designer cited the SOR but didn't own or defer it. Two recovery paths:
+     1. **Edit-fix:** if the SOR fits the sub-epic, add it to `manifest.issues` (`save_issue` to ensure the Linear issue exists with the right scope, then append to `manifest.issues`).
+     2. **Reject:** if the SOR belongs to a different sub-epic and no other designer owns it, reject — the architect needs to address the gap. Note the orphaned SOR in `concerns_unfixed`.
+
+9. **Non-defects.** Stylistic disagreements about issue titles, ordering preferences without dependency justification, or "could be tightened" prose are NOT defects. Don't edit for taste.
 
 When you edit `manifest.json`, preserve the schema exactly. After every edit, re-validate with `jq . <subject_state_dir>/manifest.json >/dev/null` (in a `bash -c`). If validation fails, restore from your in-memory copy and re-write — a malformed manifest blocks every implement wizard for this epic.
 
