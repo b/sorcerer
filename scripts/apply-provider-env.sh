@@ -13,12 +13,24 @@
 #   SORCERER_PROVIDER_MODELS   JSON object of per-role model overrides, or "{}"
 #   SORCERER_PROVIDER_REASON   short human-readable explanation (for logs)
 #
-# Selection rule: strict primary → fallback. Iterate `config.providers` in
-# order and pick the first entry whose `providers_state[name].throttled_until`
-# is either null, missing, or in the past. If every provider is throttled,
-# SORCERER_ACTIVE_PROVIDER is left empty and the caller should NOT attempt the
-# claude -p call (the tick handles this by setting `paused_until` at the
-# coordinator level; coordinator-loop.sh already honors that).
+# Selection rule (slice 62): round-robin among non-throttled providers.
+# Strict primary→fallback (the prior rule) concentrates load on the first
+# provider until it hits the weekly limit, then on the second, etc. With
+# four Max accounts, that's the worst possible shape — one account burns
+# its weekly ceiling while three sit idle. Round-robin spreads load: each
+# spawn advances a cursor in `.sorcerer/last-provider` to the next
+# non-throttled provider, wrapping at the end. Effective per-account load
+# becomes 1/N of total, pushing the weekly ceiling N× further.
+#
+# Cursor file format: a single line containing the provider name last
+# picked. Created on first use. Lives in the project's .sorcerer/ — each
+# project rotates independently. Concurrent callers (multiple wizards
+# sourcing this script in the same tick) coordinate via flock on the
+# cursor file so no two callers pick the same provider in a race.
+#
+# When EVERY provider is throttled, SORCERER_ACTIVE_PROVIDER is left empty
+# (same as before) and the caller should NOT attempt the claude -p call.
+# The tick handles this by setting `paused_until` at the coordinator level.
 #
 # Env var expansion: a value of `${NAME}` in a provider's `env` map expands to
 # the caller's current value of `$NAME`. Literal values are exported verbatim.
@@ -49,25 +61,72 @@ fi
 
 _now_epoch=$(date +%s)
 
-# Walk providers in order; first non-throttled wins.
-while IFS= read -r _name; do
-  [[ -z "$_name" ]] && continue
+# Round-robin selection (slice 62). Read the cursor (last-picked provider
+# name); start the scan one position past the cursor; wrap modulo the
+# provider count; pick the first non-throttled. If the cursor names a
+# provider no longer in config (added/removed across coord restarts),
+# treat as if the cursor were unset (start at index 0).
+_cursor_file="$(dirname "$_state")/last-provider"
+_cursor=""
+if [[ -f "$_cursor_file" ]]; then
+  _cursor=$(cat "$_cursor_file" 2>/dev/null || echo "")
+fi
+
+# Build the providers[].name array as a bash array.
+_provider_names=()
+while IFS= read -r _n; do
+  [[ -z "$_n" ]] && continue
+  _provider_names+=("$_n")
+done < <(jq -r '(.providers // [])[].name' "$_cfg")
+
+_n_total="${#_provider_names[@]}"
+[[ "$_n_total" -gt 0 ]] || { return 0 2>/dev/null || exit 0; }
+
+# Find cursor's index. If the cursor names a removed provider, _cursor_idx
+# stays -1 and the next-pos formula starts at 0.
+_cursor_idx=-1
+for ((_i = 0; _i < _n_total; _i++)); do
+  if [[ "${_provider_names[$_i]}" == "$_cursor" ]]; then
+    _cursor_idx="$_i"
+    break
+  fi
+done
+
+# Walk up to N positions starting just past the cursor.
+_picked_idx=-1
+for ((_step = 1; _step <= _n_total; _step++)); do
+  _try_idx=$(( (_cursor_idx + _step) % _n_total ))
+  _try_name="${_provider_names[$_try_idx]}"
 
   _throttled_until=""
   if [[ -f "$_state" ]]; then
-    _throttled_until=$(jq -r --arg n "$_name" '(.providers_state[$n].throttled_until // "")' "$_state" 2>/dev/null || echo "")
+    _throttled_until=$(jq -r --arg n "$_try_name" '(.providers_state[$n].throttled_until // "")' "$_state" 2>/dev/null || echo "")
   fi
-
   if [[ -n "$_throttled_until" ]]; then
     _t_epoch=$(date -d "$_throttled_until" +%s 2>/dev/null || echo 0)
     if (( _t_epoch > _now_epoch )); then
-      continue  # still cooling down
+      continue   # this provider still cooling down; try the next
     fi
   fi
 
-  SORCERER_ACTIVE_PROVIDER="$_name"
+  SORCERER_ACTIVE_PROVIDER="$_try_name"
+  _picked_idx="$_try_idx"
   break
-done < <(jq -r '(.providers // [])[].name' "$_cfg")
+done
+
+# Persist the new cursor under flock so concurrent callers (multiple
+# wizards sourcing this script in the same tick) advance through the
+# rotation cleanly without two of them picking the same provider.
+if [[ "$_picked_idx" -ge 0 ]]; then
+  if command -v flock >/dev/null 2>&1; then
+    (
+      flock -x 9
+      printf '%s\n' "$SORCERER_ACTIVE_PROVIDER" > "$_cursor_file"
+    ) 9>"${_cursor_file}.lock"
+  else
+    printf '%s\n' "$SORCERER_ACTIVE_PROVIDER" > "$_cursor_file"
+  fi
+fi
 
 if [[ -z "$SORCERER_ACTIVE_PROVIDER" ]]; then
   SORCERER_PROVIDER_REASON="all providers throttled"
