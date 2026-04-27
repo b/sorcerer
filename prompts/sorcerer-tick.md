@@ -905,6 +905,29 @@ Then in steps 9 and 10, process candidates subject to the concurrency cap.
 
 Read `config.json:limits.max_concurrent_wizards` (default 3). Count running entries. For each implement candidate from step 8, while running-count is below the cap:
 
+**Pre-flight resource gate (run once at the top of step 9, before iterating candidates).** Spawning an implement wizard allocates a worktree (typically 100MB-300MB depending on repo) and the wizard's `cargo` (or equivalent) build can grow `target/` to 10-20GB. Disk exhaustion is the canonical SOR-381 failure mode — a wizard reports `IMPLEMENT_FAILED` because workspace gates can't write to disk, and now slice 55 has to WIP-preserve work that should never have been spawned in the first place. Pre-flight refuses to spawn when host resources are below floor. The gate is **disk + provider** today; memory-floor is structurally similar but harder to threshold meaningfully (cargo's RSS varies wildly by crate) and is left for a follow-up.
+
+1. **Disk floor.** Read `config.json:limits.disk_floor_gb` (default `40`). Run `df -BG --output=avail "$PROJECT_ROOT" | tail -1 | tr -dc '0-9'` to get available GB. If `< disk_floor_gb`: do NOT spawn any candidates this tick. Append ONE escalation per tick (suppress duplicates by checking the most recent `escalations.log` line for `rule: spawn-deferred-disk-floor` from this tick):
+   ```bash
+   jq -nc \
+     --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+     --arg rule "spawn-deferred-disk-floor" \
+     --argjson avail_gb <N> \
+     --argjson floor_gb <FLOOR> \
+     --argjson candidates_deferred <COUNT> \
+     --arg attempted "Implement spawn deferred this tick: host has <N>G free, below floor <FLOOR>G. <COUNT> candidates queued." \
+     --arg needs_from_user "Free disk (target/ caches, model weights, archived bare clones) or lower limits.disk_floor_gb in config.json. Coordinator will retry on the next tick once free space is above floor." \
+     '{ts:$ts, wizard_id:null, mode:"coordinator", issue_key:null, pr_urls:null, rule:$rule, attempted:$attempted, needs_from_user:$needs_from_user, avail_gb:$avail_gb, floor_gb:$floor_gb, candidates_deferred:$candidates_deferred}' \
+     >> .sorcerer/escalations.log
+   ```
+   Emit `tick: spawn deferred — disk <N>G < floor <FLOOR>G` to stdout and skip step 10 entirely. **Step 11 (heartbeat poll) and step 13 (cleanup) MUST still run** — running ticks free disk via merged-wizard cleanup, so blocking them would be self-defeating.
+
+2. **Provider floor.** Sample `apply-provider-env.sh` indirectly: read `config.json:providers[].name` and `sorcerer.json:providers_state[<name>].throttled_until`. Count providers whose `throttled_until` is null/missing/in-the-past. If `0`: do NOT spawn any candidates this tick. Suppress duplicate escalations as above; emit `tick: spawn deferred — all providers throttled` and skip step 10.
+
+3. **Concurrency floor (existing).** If `running_count >= max_concurrent_wizards`: skip step 10 entirely; current implements drain naturally before next spawn.
+
+If all three floors pass, proceed to per-candidate processing below.
+
 0. **Allowlist gate (hard fail, don't spawn).** Read `config.json:repos` into a set. For each entry in `issue.repos`, verify membership. If ANY of `issue.repos` is NOT in `config.repos`:
    - Do NOT create worktrees. Do NOT spawn. This is a design-layer contract violation (the designer or architect escaped the sub-epic scope).
    - Append one JSON line to `.sorcerer/escalations.log`:
