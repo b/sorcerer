@@ -124,10 +124,26 @@ FULL_PROMPT="$PROMPT_BODY
 $INPUTS
 </inputs>"
 
-# Run the second reviewer. Read-only by default — no bypassPermissions. The
-# prompt itself instructs the reviewer not to write; the permission default
-# is the belt to the suspenders.
-TICK_ARGS=(--output-format text)
+# Run the second reviewer with a HARD tool whitelist. The prompt instructs
+# the reviewer to be read-only, but a prompt is just text. Slice 63 traced
+# the 2026-04-28 .sorcerer/ wipe to this very script: the reviewer claude -p
+# had unconstrained Bash, ran `git checkout <pr-branch>` to inspect the PR
+# tree, then `git clean -fdx` to "clean up" — and `.sorcerer/` (untracked,
+# not gitignored at the time) got nuked along with the rest of the working
+# tree. The whitelist below makes that impossible at the harness level.
+#
+# Tools the reviewer needs:
+#   Read / Grep / Glob — inspect source files, citations, design docs.
+#   Bash(gh *)         — gh pr diff, gh pr view, gh api repos/...
+#   mcp__plugin_linear_linear__get_issue / list_comments / list_issues —
+#                        fetch issue body, prior comments, related issues.
+# Tools the reviewer MUST NOT have:
+#   Bash (unrestricted), Write, Edit — would let it modify the project tree
+#   or sorcerer state. The harness blocks them; the prompt also forbids them.
+TICK_ARGS=(
+  --output-format text
+  --allowedTools 'Read Grep Glob Bash(gh *) mcp__plugin_linear_linear__get_issue mcp__plugin_linear_linear__list_comments mcp__plugin_linear_linear__list_issues'
+)
 # Inherit model + effort from config.json's reviewer entry, falling back to
 # coordinator's choices if reviewer-specific aren't set.
 if [[ -f .sorcerer/config.json ]]; then
@@ -146,17 +162,29 @@ out=$(timeout 1500 claude -p "${TICK_ARGS[@]}" "$FULL_PROMPT" < /dev/null 2>&1) 
   exit 1
 }
 
-# Extract the JSON object — last `{...}` block in the output. The reviewer
-# prompt asks for "exactly one JSON object" but be forgiving of trailing
-# whitespace / accidental prose.
-json=$(printf '%s\n' "$out" | awk '
-  /^\s*\{/ { in_json=1; buf="" }
-  in_json   { buf = buf $0 "\n" }
-  /^\s*\}/  { if (in_json) { last=buf; in_json=0 } }
-  END       { if (last != "") print last }
-')
+# Extract the JSON object — the LAST balanced `{...}` block in the output.
+# The prior awk-only extractor (slice 59) failed on nested-brace JSON
+# because `^\s*\}` matches any closing brace at line start, including
+# inner-object closes — it returned a truncated buffer that `jq -e .`
+# rejected, the script exited 1, and the tick fell back to the first
+# opinion. Slice 63 fix: scan candidates with `jq` itself by trying to
+# parse each `{`-onset substring up to a matching `}` line; keep the
+# last one that validates.
+json=""
+mapfile -t _lines <<<"$out"
+for ((i = ${#_lines[@]} - 1; i >= 0; i--)); do
+  [[ "${_lines[$i]}" =~ ^[[:space:]]*\} ]] || continue
+  for ((j = 0; j <= i; j++)); do
+    [[ "${_lines[$j]}" =~ ^[[:space:]]*\{ ]] || continue
+    candidate=$(printf '%s\n' "${_lines[@]:$j:$((i - j + 1))}")
+    if jq -e . <<<"$candidate" >/dev/null 2>&1; then
+      json="$candidate"
+      break 2
+    fi
+  done
+done
 
-if [[ -z "$json" ]] || ! jq -e . <<<"$json" >/dev/null 2>&1; then
+if [[ -z "$json" ]]; then
   echo "ERROR: second-opinion produced no parseable JSON object" >&2
   printf '%s\n' "$out" | tail -30 >&2
   exit 1
