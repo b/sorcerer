@@ -476,6 +476,26 @@ else
   warn "no bare clones yet — skipped freshness check"
 fi
 
+# === .sorcerer/ in project .gitignore (slice 63) ===
+# `git clean -fd` (no -x) skips gitignored paths. `git clean -fdx` still
+# nukes them, but the more-paranoid invocation is a deliberate operator
+# choice. Without `.sorcerer/` in .gitignore, even a casual `git clean`
+# (or a wizard claude -p with unconstrained Bash) wipes the entire state
+# directory — which is what happened on 2026-04-28 (slice 63's prevention
+# scope). Slice 63's primary fix sandboxes the second-opinion reviewer;
+# this check is the defense-in-depth.
+section ".sorcerer/ gitignore (defense in depth)"
+_gitignore="$PROJECT_ROOT/.gitignore"
+if [[ -f "$_gitignore" ]]; then
+  if grep -qE '^\.sorcerer/?$' "$_gitignore"; then
+    ok ".sorcerer/ listed in $PROJECT_ROOT/.gitignore"
+  else
+    no ".sorcerer/ NOT in $PROJECT_ROOT/.gitignore — a casual 'git clean -fd' will wipe the state directory. Add a single line '.sorcerer/' to .gitignore."
+  fi
+else
+  warn "no .gitignore in $PROJECT_ROOT — cannot defend .sorcerer/ from git clean. Create a .gitignore listing '.sorcerer/'"
+fi
+
 # === Disk floor ===
 section "Disk floor (vs limits.disk_floor_gb)"
 floor_gb=40
