@@ -154,7 +154,46 @@ has_in_flight_work() {
     done
   done
 
+  # Last-chance: even with sorcerer.json drained, Linear may still hold
+  # non-terminal issues for this project's team that no live entry claims.
+  # Without this check, the coordinator exits the moment in-memory state
+  # empties and the Backlog never gets pulled in. Result is cached on
+  # disk so we don't burn a `claude -p` query every loop iteration.
+  if has_unclaimed_linear_work; then
+    return 0
+  fi
+
   return 1
+}
+
+# Cached Linear-work check. Calls scripts/has-linear-work.sh, caches the
+# answer for LINEAR_WORK_CACHE_TTL seconds. Returns 0 if Linear has
+# unclaimed non-terminal issues, 1 if not (or the helper is uncertain —
+# "unknown" maps to 1 so the coordinator can still exit cleanly when
+# Linear MCP is unreachable; the operator sees the helper's output in
+# coordinator.log if anything looks off).
+LINEAR_WORK_CACHE_TTL=300   # 5 minutes
+LINEAR_WORK_CACHE_FILE=".sorcerer/.linear-work-cache"
+has_unclaimed_linear_work() {
+  local helper="$SORCERER_REPO/scripts/has-linear-work.sh"
+  if [[ ! -x "$helper" ]]; then
+    return 1   # helper not installed — degrade to old behavior
+  fi
+  local cached_age=999999 cached_value=""
+  if [[ -f "$LINEAR_WORK_CACHE_FILE" ]]; then
+    cached_age=$(( $(date +%s) - $(stat -c %Y "$LINEAR_WORK_CACHE_FILE" 2>/dev/null || echo 0) ))
+    cached_value=$(cat "$LINEAR_WORK_CACHE_FILE" 2>/dev/null)
+  fi
+  local value=""
+  if (( cached_age < LINEAR_WORK_CACHE_TTL )) && [[ -n "$cached_value" ]]; then
+    value="$cached_value"
+  else
+    value=$(bash "$helper" "$PROJECT_ROOT" 2>/dev/null | tail -1)
+    [[ -z "$value" ]] && value="unknown"
+    printf '%s\n' "$value" > "$LINEAR_WORK_CACHE_FILE"
+    echo "[$(ts)] linear-work-check: $value (helper queried, cached ${LINEAR_WORK_CACHE_TTL}s)"
+  fi
+  [[ "$value" == "yes" ]]
 }
 
 echo "[$(ts)] coordinator-loop started (pid $$) for $PROJECT_ROOT"
