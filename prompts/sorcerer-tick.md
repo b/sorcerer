@@ -20,6 +20,7 @@ The user is not watching the terminal between ticks — events.log is attached o
 - `issue-merged` — a unit of work shipped. Message: `sorcerer: merged <issue_key> — "<short issue title>" (<N> PR(s))`. Fetch the Linear issue title via `mcp__plugin_linear_linear__get_issue` once per merged issue if you don't already have it in memory.
 - `review-refer-back` — the LLM gate found fixable problems; a feedback cycle is starting. Message: `sorcerer: referred back <issue_key> (cycle <N>) — <one-line reason>`.
 - Any new line appended to `.sorcerer/escalations.log` this tick. Message: `sorcerer: escalation — <rule> (<issue_key or wizard id>). /sorcerer status for details`.
+- `pr-orphan-adopted` — sorcerer found an open bot-authored PR with no live wizard claim and synthesized an `awaiting-review` entry for it. Message: `sorcerer: adopted orphan PR <repo>#<num> (<issue_key or branch>) — review gate next tick`. State drift is worth surfacing because adoption usually means an entry was lost from `sorcerer.json`; one notification per adoption per tick.
 - `coordinator-paused` event (new `paused_until` set this tick due to rate-limit storm). Message: `sorcerer: paused ~15m — rate limit hit on <N> spawns. Will auto-resume`.
 - Coordinator exit condition satisfied at the end of this tick (no in-flight work, loop will terminate) AND at least one issue was merged during this coordinator's lifetime. Message: `sorcerer: all work complete — <N> issues merged. coordinator exiting`. Skip if nothing ever merged (nothing to celebrate).
 
@@ -181,6 +182,179 @@ printf '{"ts":"%s","event":"pr-set-recovered","id":"%s","issue_key":"%s","pr_cou
 ```
 
 This is only applicable to `mode: implement | feedback | rebase` wizards — the ones that have `branch_name` + `repos` + `state_dir` fields. Architect and designer wizards produce plan/manifest files locally and don't have a PR fallback, so they stay on the original failed/respawn path.
+
+## Orphan-PR adoption (for PRs whose owning wizard was pruned)
+
+`discover_pr_set` above only helps wizards that are *still* in `active_wizards` but went stale. It does NOT help when the wizard's `active_wizards` entry has been removed entirely — by an operator who manually edited `sorcerer.json`, by a state-file rewrite that dropped completed/failed entries before the PR was reviewed, by a crash that killed the entry write *between* opening the PR and persisting the entry, etc. In those cases the PR sits open on GitHub but is invisible to the tick: step 12 iterates `active_wizards` and finds nothing for that PR, so the merge gate never runs.
+
+The fix is to scan GitHub once per tick for **open bot-authored PRs on configured repos that no `active_wizards` entry claims**, and synthesize an `awaiting-review` entry so step 12 picks them up on its own terms.
+
+**Helper — discover orphan PRs:**
+
+```bash
+# Print one JSON line per orphan PR (open, bot-authored, on a configured
+# repo, not claimed by any active_wizards entry). Each line:
+#   {"repo":"<owner/name>","pr_url":"...","branch":"...","head_sha":"...","issue_key":"<SOR-N|null>"}
+# Returns 0 always; empty output means no orphans this tick.
+discover_orphan_prs() {
+  # Args: $1 = bot login (e.g. "sorcerer-b3k[bot]" — the App identity that
+  # authenticated `gh`). Pass "@me" if `gh` is authed as the App itself.
+  local bot_author="$1"
+  # Build the set of (branch_name, pr_url) pairs already claimed by any
+  # active_wizards entry — both fields, since an entry might have one and
+  # not the other depending on lifecycle stage.
+  local claimed_branches claimed_urls
+  claimed_branches=$(jq -r '
+    [(.active_wizards // [])[]
+     | select(.mode | IN("implement","feedback","rebase"))
+     | .branch_name // empty] | .[]
+  ' .sorcerer/sorcerer.json | sort -u)
+  claimed_urls=$(jq -r '
+    [(.active_wizards // [])[]
+     | select(.mode | IN("implement","feedback","rebase"))
+     | (.pr_urls // {}) | to_entries[] | .value] | .[]
+  ' .sorcerer/sorcerer.json | sort -u)
+
+  # Also exclude branches that match the bare-clone-only "wip/<wizard-id>"
+  # WIP-preservation pattern — those are pushed by failed-wizard preservation
+  # for audit, not for review/merge, and adopting them would loop the gate
+  # on permanently-failed work.
+  local repos
+  repos=$(jq -r '(.repos // []) | .[]' .sorcerer/config.json)
+
+  for repo_path in $repos; do
+    local slug="${repo_path#github.com/}"
+    # Open PRs authored by the bot, with branch + head-sha for adoption.
+    gh pr list --repo "$slug" --state open --author "$bot_author" \
+      --json url,headRefName,headRefOid \
+      --jq '.[] | "\(.url)\t\(.headRefName)\t\(.headRefOid)"' 2>/dev/null \
+    | while IFS=$'\t' read -r url branch sha; do
+        [[ -n "$url" ]] || continue
+        # Skip wip/<uuid> WIP-preservation branches — those are not meant for review.
+        [[ "$branch" =~ ^wip/[0-9a-f-]{8,}$ ]] && continue
+        # Skip if any active_wizards entry already claims this branch or URL.
+        if grep -qxF "$branch" <<<"$claimed_branches" || grep -qxF "$url" <<<"$claimed_urls"; then
+          continue
+        fi
+        # Try to derive issue key from the branch slug; null if not present.
+        local issue_key
+        issue_key=$(printf '%s' "$branch" | grep -oiE '[A-Z]{2,5}-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]')
+        [[ -z "$issue_key" ]] && issue_key="null"
+        jq -nc \
+          --arg repo "$slug" --arg url "$url" --arg branch "$branch" \
+          --arg sha "$sha" --arg ik "$issue_key" \
+          '{repo:$repo, pr_url:$url, branch:$branch, head_sha:$sha,
+            issue_key:(if $ik=="null" then null else $ik end)}'
+      done
+  done
+}
+```
+
+**Adoption action** (synthesize an `active_wizards` entry, materialize a worktree, append event):
+
+```bash
+# Given one orphan-PR JSON record, synthesize the active_wizards entry and
+# the on-disk scaffold. Idempotent: if a wizard dir already exists for this
+# branch (from a previous adoption that crashed before sorcerer.json was
+# written), reuse it; do not double-add.
+adopt_orphan_pr() {
+  local orphan_json="$1"   # one line from discover_orphan_prs
+  local repo branch sha url issue_key
+  repo=$(jq -r '.repo'      <<<"$orphan_json")
+  branch=$(jq -r '.branch'  <<<"$orphan_json")
+  sha=$(jq -r '.head_sha'   <<<"$orphan_json")
+  url=$(jq -r '.pr_url'     <<<"$orphan_json")
+  issue_key=$(jq -r '.issue_key // ""' <<<"$orphan_json")
+
+  local wid
+  wid=$(uuidgen)
+  local state_dir=".sorcerer/wizards/${wid}"
+  mkdir -p "${state_dir}/logs"
+
+  # Materialize a worktree at the PR head from the bare clone, so the
+  # step 12 LLM gate can read the post-PR file content. Bare-clone path
+  # convention: .sorcerer/repos/<owner>-<name>.git/
+  local owner_repo_slug="${repo//\//-}"
+  local bare=".sorcerer/repos/${owner_repo_slug}.git"
+  local worktree="${state_dir}/trees/${repo}"
+  mkdir -p "$(dirname "$worktree")"
+  if [[ -d "$bare" ]]; then
+    # Fetch the PR head into the bare clone; -f because the remote ref may
+    # have moved since the bare clone last fetched.
+    git -C "$bare" fetch -f origin "+refs/pull/${url##*/}/head:refs/sorcerer-orphan/${wid}" 2>/dev/null \
+      || git -C "$bare" fetch -f origin "+${branch}:refs/sorcerer-orphan/${wid}" 2>/dev/null || true
+    git -C "$bare" worktree add --detach "$worktree" "refs/sorcerer-orphan/${wid}" 2>/dev/null \
+      || git -C "$bare" worktree add --detach "$worktree" "$sha" 2>/dev/null || true
+  fi
+  # If worktree creation failed (no bare clone, or fetch failed), leave
+  # worktree_paths empty for this repo. The step 12 gate must handle the
+  # empty-worktree case for orphan-adopted entries — fall back to
+  # `gh api repos/<repo>/contents/<path>?ref=<sha>` for any file the gate
+  # would otherwise read from disk. Log a `worktree-materialization-failed`
+  # warning into the wizard's logs/ so an operator can investigate.
+  local wt_path=""
+  [[ -d "$worktree/.git" || -f "$worktree/.git" ]] && wt_path="$(realpath "$worktree")"
+
+  # Write pr_urls.json so step 12's machinery sees the same shape it expects.
+  jq -n --arg k "$repo" --arg v "$url" '{($k): $v}' > "${state_dir}/pr_urls.json"
+
+  # Build the active_wizards entry. issue_linear_id is left null at adoption;
+  # step 12 stage 6.1 must tolerate that for orphan-adopted entries (note
+  # "issue context unavailable, orphan-adopted PR" in the evidence and
+  # proceed against diff + acceptance signals available from the PR body).
+  local now
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local entry
+  entry=$(jq -nc \
+    --arg id "$wid" \
+    --arg started "$now" \
+    --arg ik "$issue_key" \
+    --arg branch "$branch" \
+    --arg repo "$repo" \
+    --arg url "$url" \
+    --arg sd "$state_dir" \
+    --arg wt "$wt_path" \
+    '{
+      id: $id,
+      mode: "implement",
+      status: "awaiting-review",
+      started_at: $started,
+      designer_id: null,
+      issue_linear_id: null,
+      issue_key: (if $ik=="" then null else $ik end),
+      branch_name: $branch,
+      repos: [$repo],
+      worktree_paths: (if $wt=="" then {} else {($repo): $wt} end),
+      pr_urls: {($repo): $url},
+      state_dir: $sd,
+      review_decision: null,
+      pid: null,
+      respawn_count: 0,
+      refer_back_cycle: 0,
+      conflict_cycle: 0,
+      retry_after: null,
+      throttle_count: 0,
+      orphan_adopted: true
+    }')
+  # Caller appends $entry to .active_wizards in sorcerer.json.
+
+  # Event:
+  printf '{"ts":"%s","event":"pr-orphan-adopted","id":"%s","issue_key":%s,"repo":"%s","branch":"%s","pr_url":"%s","worktree":%s}\n' \
+    "$now" "$wid" \
+    "$(jq -Rn --arg ik "$issue_key" 'if $ik=="" then null else $ik end')" \
+    "$repo" "$branch" "$url" \
+    "$(jq -Rn --arg wt "$wt_path" 'if $wt=="" then null else $wt end')" \
+    >> .sorcerer/events.log
+
+  printf '%s\n' "$entry"   # caller reads stdout to merge into state
+}
+```
+
+**The adopted entry carries a new `orphan_adopted: true` field.** Step 12's stage 6.1 (gather full review materials) MUST check this field and:
+- Skip the `mcp__plugin_linear_linear__get_issue` call when `issue_linear_id` is null, and note "orphan-adopted PR — no Linear issue context" in the evidence.
+- When `worktree_paths[repo]` is empty for any repo, fall back to `gh api repos/<repo>/contents/<path>?ref=<head_sha>` for cited code reads. The diff (`gh pr diff`) is still authoritative for what changed; only the post-PR full-file reads need the fallback.
+
+**This procedure is only applicable to PRs that look like sorcerer wizard output.** Filtering on bot author + branch-pattern (excluding `wip/<uuid>` WIP-preservation branches) is the gate; operator-pushed PRs under the bot identity should not be adopted automatically. If a false adoption happens anyway, an operator can apply a `no-adopt` label to the PR and amend `discover_orphan_prs` to skip labeled PRs (not implemented in the helper above — add `--label '!no-adopt'` to the `gh pr list` filter when this becomes a real failure mode).
 
 ## Failed-wizard WIP preservation (for implement / feedback / rebase wizards)
 
@@ -434,10 +608,13 @@ If 429 detected:
       "refer_back_cycle": 0,
       "conflict_cycle": 0,
       "retry_after": "<ISO-8601 or null>",
-      "throttle_count": 0
+      "throttle_count": 0,
+      "orphan_adopted": false
     }
   ]
 }
+
+`orphan_adopted: true` is set ONLY on entries synthesized by step 11d's adoption phase from a bot-authored PR with no live wizard claim. Stage 6.1 of the merge gate keys off this field to skip the Linear fetch when `issue_linear_id` is null and to fall back to `gh api contents?ref=<sha>` reads when `worktree_paths` is empty. The flag is informational elsewhere; cleanup, archival, and refer-back paths treat the entry like any other implement wizard.
 ```
 
 **`.sorcerer/.token-env`** — written by step 2; sourced by `scripts/spawn-wizard.sh` at startup:
@@ -455,6 +632,7 @@ export GH_APP_TOKEN_EXPIRES_AT='2026-04-21T00:00:00Z'
 {"ts":"...","event":"architect-completed","id":"<uuid>","sub_epics":["..."]}
 {"ts":"...","event":"designer-spawned","id":"<uuid>","architect_id":"<uuid>","sub_epic":"<name>","pid":12346}
 {"ts":"...","event":"designer-completed","id":"<uuid>","epic_linear_id":"<linear-id>","issues":7}
+{"ts":"...","event":"pr-orphan-adopted","id":"<uuid>","issue_key":"<SOR-N|null>","repo":"<owner/name>","branch":"...","pr_url":"...","worktree":"<path|null>"}
 {"ts":"...","event":"tick-complete"}
 ```
 
@@ -1186,6 +1364,32 @@ mtime=$(stat -c %Y <state_dir>/heartbeat 2>/dev/null)
       Capture new pid. Append `implement-stale-respawn` event.
     - `respawn_count >= 1`: run **Failed-wizard WIP preservation** (above) BEFORE the status write. Then `status: failed`. Append to `.sorcerer/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: implement`, `issue_key: <SOR-N>`, and the `wip_branch` value.
 
+### Step 11d — Orphan-PR adoption
+
+Before step 12 runs the merge gate, scan GitHub for **bot-authored PRs on configured repos that no `active_wizards` entry claims**, and synthesize `awaiting-review` entries for them. See "Orphan-PR adoption" above for the failure mode and the helpers; this step wires them into the tick.
+
+1. Determine the bot author. Read the App identity from the gh authentication context — `gh api user --jq .login` returns the bot user (e.g. `sorcerer-b3k[bot]`). On installations where the App login isn't directly resolvable, fall back to the literal `app/<App-slug>` form documented in `config.json` under `github.bot_login` (add the field if absent; doctor.sh should warn when it can't be derived).
+
+2. Run `discover_orphan_prs "<bot-author>"`. If the output is empty, skip the rest of this step.
+
+3. For each line of output (one orphan PR per line):
+   - Call `adopt_orphan_pr "<orphan_json>"`. Capture the synthesized entry from stdout.
+   - Append the entry to `.active_wizards` in `sorcerer.json`. Use `jq` with input piping to avoid clobbering concurrent writes:
+     ```bash
+     tmpf=$(mktemp)
+     jq --argjson entry "$new_entry" '.active_wizards += [$entry]' .sorcerer/sorcerer.json > "$tmpf"
+     mv "$tmpf" .sorcerer/sorcerer.json
+     ```
+   - Log into the coordinator log: `tick: adopted orphan PR <pr_url> as wizard <wid> (issue <SOR-N or "?">, branch <branch>)`.
+
+4. **Cap the per-tick adoption count at 5.** If `discover_orphan_prs` returns more than 5, adopt the first 5 (sorted by repo then branch for determinism), log `tick: deferred N orphan-PR adoptions to next tick (per-tick cap)`, and let subsequent ticks pick up the rest. The cap protects against an accidental flood (e.g. someone authors 50 PRs under the bot identity by mistake) and gives the merge gate room to process adopted entries before the next batch lands.
+
+5. **Rate the worktree-materialization step.** If `git worktree add` fails for an orphan, the entry is still added with empty `worktree_paths` — step 12 must fall back to GitHub-API reads, per the contract documented in "Orphan-PR adoption" above. Do NOT block adoption on a worktree failure; an orphan PR with no worktree is still better than an orphan PR the gate ignores.
+
+6. Adopted entries flow into step 12 normally on the *same* tick — once `.active_wizards` has been updated, step 12's `for each active_wizards entry with mode: implement and status: awaiting-review` loop will see them. There's no need to defer adoption to the next tick.
+
+The `orphan_adopted: true` flag on synthesized entries is informational only at this layer; step 12's stage 6.1 reads it to decide on the Linear-fetch skip and worktree-fallback paths.
+
 ### Step 12 — PR-set review and merge
 
 For each `active_wizards` entry with `mode: implement` and `status: awaiting-review`:
@@ -1222,10 +1426,10 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
    ### Stage 6.1 — Gather full review materials
 
    - **Full diff per PR.** `gh pr diff <pr_url>` for each PR in `pr_urls`. NOT `gh pr view --json files` — that JSON field truncates per-file patches above ~30KB and silently drops them entirely above ~1MB; on a 5000-line bump-class PR, you'd review filenames only and not notice. The unified-diff output is what you reason over.
-   - **Linear issue body** — `mcp__plugin_linear_linear__get_issue` with `id=<issue_linear_id>`. Read description + acceptance criteria fully (do not summarize and discard).
-   - **Cited design docs.** Scan the issue body for paths matching `docs/.*\.md` and `adr/\d+`. For each: fetch the post-PR version via the worktree (`<worktree_path>/<doc_path>`) — these may have been touched by the diff. For ADRs cited as "pinned" or "load-bearing", read in full; for subsystem docs, at minimum read the section the issue body cites.
-   - **Project rules.** `<repo>/CLAUDE.md` and `<repo>/AGENTS.md` (if present), plus `<repo_parent>/CLAUDE.md` and `<repo_parent>/AGENTS.md` (workspace-level). These pin the project's anti-patterns; you'll need them in stage 6.3.
-   - **Cited code in its post-PR state.** Any non-trivial file in the diff — read it from the wizard's worktree, not just the patch. The patch shows the delta; the file shows whether the result is coherent.
+   - **Linear issue body** — `mcp__plugin_linear_linear__get_issue` with `id=<issue_linear_id>`. Read description + acceptance criteria fully (do not summarize and discard). **Orphan-adopted exception:** when the entry has `orphan_adopted: true` AND `issue_linear_id == null`, skip this read entirely; instead read the PR body itself (`gh pr view <pr_url> --json body --jq .body`) as the available statement of intent, and record `evidence: "orphan-adopted PR — no Linear issue context, judging against PR body and acceptance signals only"` in your working notes. If `issue_linear_id` IS set on an orphan-adopted entry (because the branch slug parsed cleanly to a known issue key), do the normal Linear fetch.
+   - **Cited design docs.** Scan the issue body — or, for orphan-adopted PRs without a Linear issue, the PR body — for paths matching `docs/.*\.md` and `adr/\d+`. For each: fetch the post-PR version via the worktree (`<worktree_path>/<doc_path>`). For ADRs cited as "pinned" or "load-bearing", read in full; for subsystem docs, at minimum read the section the issue body cites. **Worktree-fallback for orphan-adopted entries:** when `worktree_paths[<repo>]` is missing or empty (a `git worktree add` failed during adoption — see step 11d), substitute every "read from worktree" with `gh api repos/<owner>/<repo>/contents/<path>?ref=<head_sha>` against the PR's head SHA (`gh pr view <pr_url> --json headRefOid --jq .headRefOid`). The `?ref=` query yields the post-PR file content, equivalent to reading from a clean worktree. The diff (`gh pr diff`) is still authoritative for what changed; only the post-PR full-file reads need this fallback.
+   - **Project rules.** `<repo>/CLAUDE.md` and `<repo>/AGENTS.md` (if present), plus `<repo_parent>/CLAUDE.md` and `<repo_parent>/AGENTS.md` (workspace-level). These pin the project's anti-patterns; you'll need them in stage 6.3. The same worktree-fallback rule applies — read via `gh api contents` for orphan-adopted entries with no worktree.
+   - **Cited code in its post-PR state.** Any non-trivial file in the diff — read it from the wizard's worktree, not just the patch. The patch shows the delta; the file shows whether the result is coherent. Orphan-adopted-with-no-worktree: same `gh api contents?ref=<head_sha>` fallback.
 
    **Diff sampling for large PRs.** If a single PR's diff exceeds ~5000 lines, you may sample — but the sample MUST cover: every `Cargo.toml` / `build.rs` / `lib.rs` / `mod.rs` / public-API file in full, every `tests/` file in full, every design-doc edit in full, plus 3–5 representative implementation files in full. Vendored-source replacements (e.g., a `vendor/<lib>/src/` swap to a known upstream tag) may be reviewed by spot-check + verifying the upstream tag matches `VENDOR_REV`. Do NOT skip the sampling and review filenames only — that is the failure mode this stage exists to prevent.
 
