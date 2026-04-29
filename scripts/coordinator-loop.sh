@@ -294,11 +294,18 @@ while true; do
     # Capture stdout+stderr to TICK_LOG AND to this loop's own stdout via tee,
     # so coordinator.log keeps showing tick output but we can also grep the log
     # for 429 markers after exit.
-    if claude -p "${TICK_ARGS[@]}" "$TICK_PROMPT" < /dev/null 2>&1 | tee "$TICK_LOG"; then
+    #
+    # Pipe the prompt via stdin instead of argv. Linux's MAX_ARG_STRLEN caps
+    # any single argv string at 128KB (32 * PAGE_SIZE); the tick prompt has
+    # grown past that ceiling and execve() fails with E2BIG before claude
+    # even starts. Stdin has no such cap. `claude -p` reads its prompt from
+    # stdin when no positional argument is supplied.
+    if printf '%s' "$TICK_PROMPT" | claude -p "${TICK_ARGS[@]}" 2>&1 | tee "$TICK_LOG"; then
       : # tick succeeded
     else
-      # PIPESTATUS[0] is the claude -p exit code (tee can't fail in practice).
-      exit "${PIPESTATUS[0]:-1}"
+      # PIPESTATUS[1] is the claude -p exit code now that printf is upstream
+      # in the pipe (PIPESTATUS[0] = printf, [1] = claude, [2] = tee).
+      exit "${PIPESTATUS[1]:-1}"
     fi
   )
   tick_rc=$?
