@@ -397,70 +397,15 @@ export GH_APP_TOKEN_EXPIRES_AT='2026-04-21T00:00:00Z'
 
 ## Tick steps
 
-### Step 1 — Reconcile state
+### Steps 1–3 — Already done by pre-tick
 
-1. Read `.sorcerer/sorcerer.json`. If absent, treat the in-memory state as `{active_architects: [], active_wizards: []}`.
-2. Scan `.sorcerer/architects/` for subdirectories. For each `<id>` whose entry is NOT in `active_architects` AND whose `.sorcerer/architects/<id>/plan.json` exists, append a recovery entry:
-   ```json
-   {
-     "id": "<id>",
-     "status": "awaiting-tier-2",
-     "started_at": "<dir mtime, as ISO-8601>",
-     "request_file": ".sorcerer/architects/<id>/request.md",
-     "plan_file": ".sorcerer/architects/<id>/plan.json",
-     "pid": null,
-     "respawn_count": 0
-   }
-   ```
-   Useful: `ls -d .sorcerer/architects/*/ 2>/dev/null` and `stat -c %Y .sorcerer/architects/<id>` (epoch → use `date -u -d @<epoch> +%Y-%m-%dT%H:%M:%SZ` to format).
+`scripts/pre-tick.sh` runs before this LLM tick and handles steps 1–3 deterministically:
 
-### Step 2 — Token refresh
+- **Step 1** (reconcile state) — appends recovery entries for any `.sorcerer/architects/<id>/` with a `plan.json` that's missing from `active_architects`.
+- **Step 2** (token refresh) — regenerates `.sorcerer/.token-env` if it's missing or expires within 600s; appends a `token-refreshed` event.
+- **Step 3** (drain requests) — moves each `.sorcerer/requests/*.md` to a freshly-minted `.sorcerer/architects/<id>/request.md`, appends a `pending-architect` entry to `active_architects`.
 
-```bash
-TOKEN_FILE=.sorcerer/.token-env
-needs_refresh=0
-if [[ ! -f "$TOKEN_FILE" ]]; then
-  needs_refresh=1
-else
-  expires=$(grep GH_APP_TOKEN_EXPIRES_AT "$TOKEN_FILE" | sed "s/.*='\([^']*\)'.*/\1/")
-  expires_epoch=$(date -d "$expires" +%s 2>/dev/null || echo 0)
-  now_epoch=$(date +%s)
-  if (( expires_epoch - now_epoch < 600 )); then
-    needs_refresh=1
-  fi
-fi
-
-if (( needs_refresh )); then
-  bash scripts/refresh-token.sh > .sorcerer/.token-env
-  printf '{"ts":"%s","event":"token-refreshed"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .sorcerer/events.log
-fi
-```
-
-### Step 3 — Drain requests
-
-For each `.sorcerer/requests/*.md`:
-
-1. Skip files whose `request_file` is already tracked in `active_architects` or `active_wizards` (compare absolute paths).
-2. Routing decision:
-   - If the file's first 20 lines contain a line matching `^scale: large$` → architect.
-   - Otherwise → architect by default for now (the design route is stubbed below until Tier-2 is implemented).
-3. Generate UUID: `uuidgen`.
-4. For architect route:
-   - `mkdir -p .sorcerer/architects/<id>/logs`
-   - `mv .sorcerer/requests/<file> .sorcerer/architects/<id>/request.md`
-   - Append to `active_architects`:
-     ```json
-     {
-       "id": "<id>",
-       "status": "pending-architect",
-       "started_at": "<ISO-8601 now>",
-       "request_file": ".sorcerer/architects/<id>/request.md",
-       "plan_file": null,
-       "pid": null,
-       "respawn_count": 0
-     }
-     ```
-5. For design route (deferred): emit `tick: skipped design-route — not yet implemented`. Do NOT move the file (next-tick logic when designer mode lands will pick it up).
+When you read `.sorcerer/sorcerer.json` you ALREADY see the post-pre-tick state. Do not redo any of these — pre-tick already mutated `sorcerer.json` and `events.log`. Begin at step 4.
 
 ### Step 4 — Spawn architects
 

@@ -262,6 +262,12 @@ while true; do
     fi
   fi
 
+  # Pre-tick: deterministic bookkeeping (state reconciliation, token refresh,
+  # request drain). Runs in bash so the LLM tick doesn't pay tokens for it.
+  # Output goes to stdout, which the parent shell redirects to coordinator.log.
+  bash "$SORCERER_REPO/scripts/pre-tick.sh" "$PROJECT_ROOT" || \
+    echo "[$(ts)] pre-tick failed (rc=$?); continuing to tick anyway"
+
   echo "[$(ts)] running tick"
   TICK_ARGS=(--output-format text --permission-mode bypassPermissions)
   TICK_LOG=".sorcerer/last-tick.log"
