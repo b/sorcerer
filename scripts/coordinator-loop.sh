@@ -316,6 +316,16 @@ while true; do
   )
   tick_rc=$?
 
+  # Post-tick: deterministic cleanup (merged-PR cleanup with Linear→Done,
+  # 7-day archival of terminal entries). Runs only on tick success — when
+  # the tick failed (529/429/etc.) we want the next iteration to retry
+  # the LLM rather than potentially mutate state on stale assumptions.
+  # See scripts/post-tick.sh for the contract.
+  if (( tick_rc == 0 )); then
+    bash "$SORCERER_REPO/scripts/post-tick.sh" "$PROJECT_ROOT" || \
+      echo "[$(ts)] post-tick failed (rc=$?); continuing"
+  fi
+
   # --- Transient service-side overload (HTTP 529) ---------------------------
   # 529 is "Anthropic servers are overloaded" — NOT a rate-limit on this
   # account. Switching providers wouldn't help (Anthropic's backend is shared

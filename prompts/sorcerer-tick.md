@@ -1091,82 +1091,14 @@ The `orphan_adopted: true` flag on synthesized entries is informational only at 
 (The step body lives in a separate file because it is the largest step in the tick and most ticks have no awaiting-review work — paying for those ~30 KB of prompt every tick is wasted budget when the gate isn't firing.)
 
 
-### Step 13 — Cleanup merged issues
+### Steps 13-14 — Already done by post-tick
 
-For each `active_wizards` entry with `mode: implement` and `status: merging`:
+`scripts/post-tick.sh` runs AFTER this LLM tick (only on tick success, not on 429/529 paths) and handles cleanup + archival deterministically:
 
-1. Check each PR's state: `gh pr view <pr_url> --json state` per PR.
-2. If ALL PRs in the set are `MERGED`:
-   - For each repo:
-     ```bash
-     bare="repos/<owner>-<repo>.git"   # convert / to -
-     tree="<state_dir>/trees/<owner>-<repo>"
-     git -C "$bare" worktree remove "$tree" 2>/dev/null || rm -rf "$tree"
-     git -C "$bare" branch -d <branch_name> 2>/dev/null || true
-     ```
-   - **Push Linear → `Done` (mandatory, NOT delegated to the integration).** The GitHub-Linear webhook integration is unreliable for our workflow (asynchronous lag of minutes-to-hours observed in coordinator logs; sometimes does not fire at all when the merging actor is the GitHub App). The tick is the authoritative source of the Done transition. Earlier prompt text labeled this call "idempotent — Linear-GitHub integration may have done it"; the tick LLM read that as license to skip the call and the wizard wedged at `merged` with Linear stuck at `In Progress`. Do NOT skip.
-     ```
-     mcp__plugin_linear_linear__save_issue with id=<issue_linear_id>, state="Done"
-     ```
-     If this call errors (Linear MCP needs-auth, network blip, plugin not loaded):
-     - Log to stdout: `tick: linear-done-push failed for <issue_key>: <error>`.
-     - Append an escalation to `.sorcerer/escalations.log`:
-       ```json
-       {"ts":"...","rule":"linear-done-push-failed","issue_key":"<SOR-N>","wizard_id":"<wizard-id>","pr_urls":[...],"error":"<error message>"}
-       ```
-     - DO NOT mark `status: merged` this tick — leave the wizard at `status: merging`. Next tick re-enters step 13 and retries the push idempotently. (The worktree/branch cleanup above is already idempotent — `git worktree remove` and `git branch -d` are gated with `|| true` / `2>/dev/null` and re-running them is a no-op.)
-     - Skip the rest of this wizard's step-13 work this tick. Do NOT emit `issue-merged` (it would be a lie; the issue isn't `Done` in Linear yet).
-   - **Only on a successful Linear `save_issue`** (no error, or a no-op success because the integration already moved the issue to `Done` — Linear's API treats no-change updates as successful):
-     - Update entry: `status: merged`.
-     - Append to `.sorcerer/events.log`:
-       ```json
-       {"ts":"...","event":"issue-merged","id":"<wizard-id>","issue_key":"<SOR-N>"}
-       ```
-     - Print to stdout: `Merged and cleaned up: <issue_key>.`
-3. If some PRs merged but some still OPEN after >5 min (compare PR's `updatedAt` or use the `merging` start time): partial-merge state. Append escalation with `rule: partial-merge`. Update status: `blocked`.
-4. If all PRs still OPEN after >5 min: probably required-check failure or branch-protection denied. Append escalation with `rule: merge-blocked`. Update status: `blocked`.
-5. **Reconciliation sweep for already-merged wizards (Linear-Done drift recovery).** For each `active_wizards` entry with `mode: implement` and `status: merged` whose `started_at` is within the last 7 days (i.e., not yet archived per step 14):
-   - If the Linear MCP is not authenticated this tick, skip the sweep entirely (avoid logging N×needs-auth noise — the per-tick "MCP not authenticated" message is already there). The sweep retries on every subsequent tick anyway.
-   - Fetch the Linear issue: `mcp__plugin_linear_linear__get_issue` with `id=<issue_linear_id>`. If `status != "Done"` (i.e., still `In Progress`, `In Review`, etc.):
-     - Log to stdout: `tick: linear-done-drift detected for <issue_key>; pushing now`.
-     - Call `mcp__plugin_linear_linear__save_issue` with `id=<issue_linear_id>, state="Done"`.
-     - On success, append to `.sorcerer/events.log`:
-       ```json
-       {"ts":"...","event":"linear-done-reconciled","id":"<wizard-id>","issue_key":"<SOR-N>","prior_status":"<...>"}
-       ```
-     - On failure, fall through to the same escalation pattern as the in-merge push above (`rule: linear-done-push-failed`, no state change — sweep retries next tick).
-   - If `status == "Done"`, no action; the integration or a prior tick / out-of-band actor already pushed correctly. Do not log; the sweep should be quiet on the happy path so a 100-wizard archive window doesn't produce 100 log lines per tick.
+- **Step 13** (cleanup merged issues) — for each `mode: implement` / `status: merging` wizard, polls each PR's state via `gh pr view`, runs `git worktree remove` + `git branch -d` cleanup when all are MERGED, pushes Linear → Done via `scripts/linear-set-state.sh` (Haiku-backed MCP write), transitions to `merged` on Linear success or `blocked` on timeout/partial. Also runs the 7-day reconciliation sweep that calls `scripts/linear-get-state.sh` and re-pushes Done if Linear has drifted.
+- **Step 14** (archive completed wizards) — entries past 7-day retention transition to `status: archived` with `archived_at` and have their on-disk state dirs removed.
 
-This sweep recovers wizards that were marked `merged` under prior buggy prompt versions where the Linear push was silently skipped. It also catches the rare case where the in-merge push to Linear's API timed out *after* the side-effect committed — Linear shows `Done`, our state shows `merged`, but the events.log might have inconsistent ordering. The sweep makes the eventually-consistent state observable in `events.log` via `linear-done-reconciled` events.
-
-### Step 14 — Archive completed wizards after 7-day retention
-
-Terminal-state entries (architects with `status: completed` or `failed`; wizards with `status: merged`, `failed`, or `blocked`) are kept around for 7 days so the operator can inspect them. After that, their state dirs are removed and the entry's `status` transitions to `archived`.
-
-For each `active_architects` entry with `status` in (`completed`, `failed`):
-1. Compute `age_days = (now - started_at) / 1 day`.
-2. If `age_days > 7`:
-   - Resolve the state dir: `.sorcerer/architects/<id>/`.
-   - Remove it: `rm -rf .sorcerer/architects/<id>`.
-   - Update entry: `status: archived`. Keep the entry in `active_architects` (renamed to "archived" in spirit; still serves as an audit record with `archived_at` recorded).
-   - Append to `.sorcerer/events.log`:
-     ```json
-     {"ts":"...","event":"architect-archived","id":"<id>","prior_status":"<completed|failed>"}
-     ```
-
-For each `active_wizards` entry with `status` in (`merged`, `failed`, `blocked`):
-1. Compute `age_days = (now - started_at) / 1 day`.
-2. If `age_days > 7`:
-   - Resolve the state dir. For designer wizards (mode=design): `.sorcerer/wizards/<id>/`. For implement/feedback wizards (mode=implement with merged/failed/blocked status): the `state_dir` field on the entry (the issue dir).
-   - Remove it: `rm -rf <state_dir>`.
-   - Update entry: `status: archived`, `archived_at: <ISO-8601 now>`.
-   - Append to `.sorcerer/events.log`:
-     ```json
-     {"ts":"...","event":"wizard-archived","id":"<id>","mode":"<design|implement>","prior_status":"<merged|failed|blocked>"}
-     ```
-
-**Note:** archived entries stay in `sorcerer.json` as a historical record but have no state dir on disk. The coordinator never acts on `archived` entries again. If `sorcerer.json` grows unwieldy, a follow-up slice can add a secondary rotation (e.g. move archived entries to `.sorcerer/archive.json` after another 30 days).
-
+Do NOT do any of this in the LLM tick. The mutations happen between this tick's end and the next tick's pre-tick. Steps 13 and 14 are skipped from your responsibilities; proceed directly from step 12 to step 15 (persist state).
 ### Step 15 — Persist state
 
 Write the in-memory state back to `.sorcerer/sorcerer.json` via `jq` with a tmp+rename (never bash heredocs — they mangle embedded quotes, newlines, and null vs. the string "null"):
