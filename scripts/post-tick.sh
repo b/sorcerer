@@ -150,6 +150,58 @@ for entry in "${merging[@]}"; do
       printf '{"ts":"%s","event":"issue-merged","id":"%s","issue_key":"%s"}\n' \
         "$(ts)" "$wid" "$issue_key" >> "$events_log"
       log "merged and cleaned up: $issue_key (wizard $wid)"
+
+      # Secondary issue close: a single merged PR often shipped work tracked
+      # by multiple Linear issues — the wizard's own SOR-N (its
+      # issue_linear_id), AND extra issues cited in the PR title or body
+      # ("Closes SOR-NNN", "Part of SOR-NNN", "(SOR-NNN)" suffix, etc.).
+      # Without this scan, those extras stay In Progress forever because
+      # no wizard owns them and the reconciliation sweep only iterates
+      # wizards at status=merged. Scan each merged PR's title + body for
+      # SOR-NNN references in close-ish contexts; for any that's currently
+      # In Progress in Linear, flip to Done.
+      while IFS= read -r pr_url; do
+        [[ -z "$pr_url" ]] && continue
+        pr_text=$(gh pr view "$pr_url" --json title,body --jq '.title + "\n" + .body' 2>/dev/null)
+        [[ -z "$pr_text" ]] && continue
+
+        # Extract SOR-NNN occurrences from "close-ish" contexts only:
+        #   - "(SOR-NNN)" anywhere (title-suffix idiom)
+        #   - line starting with Closes/Fixes/Resolves/Part of, optionally
+        #     "Closes:", followed by SOR-NNN
+        # This deliberately excludes "Depends on SOR-NNN" and inline
+        # references in prose, which often point at separate work.
+        extras=$(printf '%s' "$pr_text" \
+          | grep -oiE '(\(SOR-[0-9]+\)|((Close[ds]?|Fix(e[ds])?|Resolve[ds]?|Part of)[ :]+SOR-[0-9]+))' \
+          | grep -oiE 'SOR-[0-9]+' \
+          | tr '[:lower:]' '[:upper:]' \
+          | sort -u)
+
+        for sor in $extras; do
+          # Skip the wizard's own primary issue — already pushed above.
+          [[ "$sor" == "$issue_key" ]] && continue
+
+          current=$(bash "$SORCERER_REPO/scripts/linear-get-state.sh" "$sor" 2>/dev/null | tail -1)
+          case "$current" in
+            Done|done|DONE)
+              # Already Done; quiet skip.
+              ;;
+            unknown|"")
+              log "secondary check skipped for $sor (linear-get-state returned '$current')"
+              ;;
+            *)
+              log "secondary close: $sor referenced in $pr_url, was '$current' — pushing Done"
+              s_result=$(bash "$SORCERER_REPO/scripts/linear-set-state.sh" "$sor" "Done" 2>/dev/null | tail -1)
+              if [[ "$s_result" == "ok" ]]; then
+                printf '{"ts":"%s","event":"linear-secondary-done","wizard_id":"%s","issue_key":"%s","ref_pr":"%s","prior_status":"%s"}\n' \
+                  "$(ts)" "$wid" "$sor" "$pr_url" "$current" >> "$events_log"
+              else
+                log "secondary push failed for $sor (result=$s_result); will retry next post-tick if PR is still in-flight"
+              fi
+              ;;
+          esac
+        done
+      done < <(echo "$pr_json" | jq -r '.[]')
     else
       bash "$SORCERER_REPO/scripts/append-escalation.sh" "$wid" "implement" "$issue_key" \
         "linear-done-push-failed" \
@@ -183,40 +235,104 @@ done
 
 # ---------- Step 13 reconciliation sweep ----------
 # For each implement wizard at status=merged within the last 7 days, ask
-# Linear for the current state. If not "Done", push it.
+# Linear for the current state of:
+#   (a) the wizard's own primary issue (.issue_linear_id) — drift recovery
+#   (b) any secondary issues referenced from the wizard's PR(s) in
+#       close-ish contexts ("Closes SOR-NNN", "Part of SOR-NNN",
+#       "(SOR-NNN)" suffix). The wizards's own SOR is excluded from
+#       the secondary scan.
+# Both scans skip when current status is already Done. The secondary
+# scan is gated by a per-wizard `secondary_scan_done: true` flag we
+# set after the first successful walk so we don't re-scan PRs every
+# tick — each wizard's PR set is scanned once (cheap, but compounds
+# across N wizards × M ticks if not gated).
 mapfile -t recently_merged < <(
   jq -rc --argjson cutoff "$seven_days_ago" '
     (.active_wizards // [])[]
     | select(.mode == "implement" and .status == "merged"
-             and (.started_at | fromdate) > $cutoff
-             and .issue_linear_id != null)
-    | [.id, .issue_key, .issue_linear_id]
+             and (.started_at | fromdate) > $cutoff)
+    | [.id, .issue_key, (.issue_linear_id // ""), (.secondary_scan_done // false), (.pr_urls // {})]
   ' "$state_file"
 )
 
 for entry in "${recently_merged[@]}"; do
-  read -r wid issue_key issue_linear_id < <(echo "$entry" | jq -r '. | "\(.[0]) \(.[1]) \(.[2])"')
+  wid=$(echo "$entry" | jq -r '.[0]')
+  issue_key=$(echo "$entry" | jq -r '.[1]')
+  issue_linear_id=$(echo "$entry" | jq -r '.[2]')
+  secondary_done=$(echo "$entry" | jq -r '.[3]')
+  reconc_pr_json=$(echo "$entry" | jq -c '.[4]')
 
-  status=$(bash "$SORCERER_REPO/scripts/linear-get-state.sh" "$issue_linear_id" 2>/dev/null | tail -1)
-  case "$status" in
-    Done|done|DONE) ;;
-    unknown|"")
-      # MCP unavailable — quiet skip. Next sweep will retry.
-      ;;
-    *)
-      log "linear-done-drift detected for $issue_key (Linear=$status); pushing now"
-      result=$(bash "$SORCERER_REPO/scripts/linear-set-state.sh" "$issue_linear_id" "Done" 2>/dev/null | tail -1)
-      if [[ "$result" == "ok" ]]; then
-        printf '{"ts":"%s","event":"linear-done-reconciled","id":"%s","issue_key":"%s","prior_status":"%s"}\n' \
-          "$(ts)" "$wid" "$issue_key" "$status" >> "$events_log"
-      else
-        bash "$SORCERER_REPO/scripts/append-escalation.sh" "$wid" "implement" "$issue_key" \
-          "linear-done-push-failed" \
-          "Reconciliation sweep: linear-set-state.sh returned '$result' for $issue_key (prior Linear=$status)." \
-          "Inspect Linear MCP auth; sweep retries on every post-tick."
-      fi
-      ;;
-  esac
+  # (a) Primary-issue drift check (skip if no Linear ID was ever set,
+  # e.g. orphan-adopted wizards).
+  if [[ -n "$issue_linear_id" && "$issue_linear_id" != "null" ]]; then
+    status=$(bash "$SORCERER_REPO/scripts/linear-get-state.sh" "$issue_linear_id" 2>/dev/null | tail -1)
+    case "$status" in
+      Done|done|DONE) ;;
+      unknown|"")
+        # MCP unavailable — quiet skip. Next sweep will retry.
+        ;;
+      *)
+        log "linear-done-drift detected for $issue_key (Linear=$status); pushing now"
+        result=$(bash "$SORCERER_REPO/scripts/linear-set-state.sh" "$issue_linear_id" "Done" 2>/dev/null | tail -1)
+        if [[ "$result" == "ok" ]]; then
+          printf '{"ts":"%s","event":"linear-done-reconciled","id":"%s","issue_key":"%s","prior_status":"%s"}\n' \
+            "$(ts)" "$wid" "$issue_key" "$status" >> "$events_log"
+        else
+          bash "$SORCERER_REPO/scripts/append-escalation.sh" "$wid" "implement" "$issue_key" \
+            "linear-done-push-failed" \
+            "Reconciliation sweep: linear-set-state.sh returned '$result' for $issue_key (prior Linear=$status)." \
+            "Inspect Linear MCP auth; sweep retries on every post-tick."
+        fi
+        ;;
+    esac
+  fi
+
+  # (b) Secondary-issue scan, run at most once per wizard.
+  if [[ "$secondary_done" != "true" ]]; then
+    secondaries_attempted=0
+    while IFS= read -r pr_url; do
+      [[ -z "$pr_url" ]] && continue
+      pr_text=$(gh pr view "$pr_url" --json title,body --jq '.title + "\n" + .body' 2>/dev/null)
+      [[ -z "$pr_text" ]] && continue
+      extras=$(printf '%s' "$pr_text" \
+        | grep -oiE '(\(SOR-[0-9]+\)|((Close[ds]?|Fix(e[ds])?|Resolve[ds]?|Part of)[ :]+SOR-[0-9]+))' \
+        | grep -oiE 'SOR-[0-9]+' \
+        | tr '[:lower:]' '[:upper:]' \
+        | sort -u)
+      for sor in $extras; do
+        [[ "$sor" == "$issue_key" ]] && continue
+        secondaries_attempted=$((secondaries_attempted + 1))
+        current=$(bash "$SORCERER_REPO/scripts/linear-get-state.sh" "$sor" 2>/dev/null | tail -1)
+        case "$current" in
+          Done|done|DONE) ;;
+          unknown|"")
+            log "secondary check skipped for $sor (linear-get-state returned '$current')"
+            ;;
+          *)
+            log "secondary close (sweep): $sor referenced in $pr_url, was '$current' — pushing Done"
+            s_result=$(bash "$SORCERER_REPO/scripts/linear-set-state.sh" "$sor" "Done" 2>/dev/null | tail -1)
+            if [[ "$s_result" == "ok" ]]; then
+              printf '{"ts":"%s","event":"linear-secondary-done","wizard_id":"%s","issue_key":"%s","ref_pr":"%s","prior_status":"%s","source":"reconc-sweep"}\n' \
+                "$(ts)" "$wid" "$sor" "$pr_url" "$current" >> "$events_log"
+            else
+              log "secondary push failed for $sor (result=$s_result); will retry next sweep"
+            fi
+            ;;
+        esac
+      done
+    done < <(echo "$reconc_pr_json" | jq -r 'to_entries[].value')
+
+    # Mark secondary-scan-done so we don't re-walk this wizard's PRs every
+    # tick. We set the flag even if zero secondaries were found (clean PR
+    # body), and even if some pushes failed (we'll retry only on explicit
+    # drift detection thereafter; the sweep is NOT the place to chase
+    # transient Linear errors).
+    mutate_state '
+      .active_wizards |= map(
+        if .id == $wid then .secondary_scan_done = true else . end
+      )
+    ' --arg wid "$wid"
+  fi
 done
 
 # ---------- Step 14: archive 7-day-old terminal entries ----------
