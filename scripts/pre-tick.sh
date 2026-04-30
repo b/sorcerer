@@ -98,11 +98,27 @@ else
   fi
 fi
 if (( needs_refresh )); then
-  if bash "$SORCERER_REPO/scripts/refresh-token.sh" > "$TOKEN_FILE" 2>/dev/null; then
+  # refresh-token.sh requires --installation-owner (or GH_APP_INSTALLATION_ID,
+  # or the GH_APP_INSTALLATION_OWNER env) when more than one App installation
+  # is reachable — which is the common case (org install + personal install).
+  # Pull the primary owner from the first repo in config.json. If config has
+  # no repos, fall back to the env var if set; otherwise skip the refresh
+  # gracefully.
+  owner=""
+  if [[ -f .sorcerer/config.json ]]; then
+    owner=$(jq -r '(.repos // [])[0] // empty' .sorcerer/config.json \
+            | sed -E 's#^github\.com/##; s#/.*$##')
+  fi
+  [[ -z "$owner" ]] && owner="${GH_APP_INSTALLATION_OWNER:-}"
+
+  if [[ -z "$owner" ]]; then
+    log "token refresh skipped: no repos in config.json and GH_APP_INSTALLATION_OWNER unset"
+  elif GH_APP_INSTALLATION_ID= bash "$SORCERER_REPO/scripts/refresh-token.sh" \
+        --installation-owner "$owner" > "$TOKEN_FILE" 2>/dev/null; then
     printf '{"ts":"%s","event":"token-refreshed"}\n' "$(ts)" >> .sorcerer/events.log
-    log "token refreshed"
+    log "token refreshed (installation owner: $owner)"
   else
-    log "token refresh failed (continuing; tick LLM may still have ambient auth)"
+    log "token refresh failed for owner '$owner' (continuing; tick LLM may still have ambient auth)"
   fi
 fi
 
