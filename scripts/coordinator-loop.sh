@@ -223,7 +223,8 @@ run_live_doctor() {
       --arg label "$label" \
       --arg attempted "doctor.sh --live-only returned $rc; see $STATE/last-doctor.log for details" \
       --arg needs_from_user "Read $STATE/last-doctor.log; remediate the FAIL items. Coord continues running in degraded mode." \
-      '{ts:$ts, wizard_id:null, mode:"coordinator", issue_key:null, pr_urls:null, rule:$rule, attempted:$attempted, needs_from_user:$needs_from_user, label:$label, log_path:$ENV.STATE+"/last-doctor.log"}' \
+      --arg log_path "$STATE/last-doctor.log" \
+      '{ts:$ts, wizard_id:null, mode:"coordinator", issue_key:null, pr_urls:null, rule:$rule, attempted:$attempted, needs_from_user:$needs_from_user, label:$label, log_path:$log_path}' \
       >> "$STATE/escalations.log"
   fi
   return 0   # never propagate
