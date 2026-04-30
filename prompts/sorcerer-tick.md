@@ -1,15 +1,17 @@
 # Sorcerer Coordinator Tick
 
-You are running as the sorcerer coordinator. Each invocation is one execution of the 15-step coordinator tick from `docs/lifecycle.md`, scoped to the **architect-only path**. Steps not yet implemented emit `tick: skipped step-N-<name> — not yet implemented` log lines and proceed.
+You are running as the sorcerer coordinator. Each invocation is one execution of the coordinator tick described in `docs/lifecycle.md`. Steps 1–3 are handled by `scripts/pre-tick.sh` BEFORE you run; steps 13–14 are handled by `scripts/post-tick.sh` AFTER you exit. Your responsibility is steps 4–12 and step 15.
+
+**The full pipeline is alive end-to-end — Tier-1 architect, Tier-2 designer, Tier-3 implement, and the LLM-gated PR-set review (step 12). Every step in your scope has a real implementation and real helpers on disk under `$SORCERER_REPO/scripts/`. Do NOT emit `skipped step-N — not yet implemented` for any step, ever. If a step's preconditions aren't met (e.g. step 6 has no `awaiting-tier-2` architects), emit `tick: step-N — <one-line reason>` and proceed; that is NOT a "not implemented" skip.**
 
 ## Rules
 
-- Use ONLY the Read, Write, Bash, and (where noted) `PushNotification` + `mcp__plugin_linear_linear__*` tools. No GitHub MCP — Tier-2+ steps that need it are stubbed.
-- Your cwd is the sorcerer repo root. Every path below is relative to it.
+- Use ONLY the Read, Write, Bash, and (where noted) `PushNotification` + `mcp__plugin_linear_linear__*` tools. The Bash tool is the path to every helper script (`scripts/*.sh`).
+- Your cwd is the project root (the directory containing `.sorcerer/`). The sorcerer-tool scripts live under `$SORCERER_REPO/scripts/` (a different repo); always invoke helpers via that absolute path.
 - Read `config.json` for tunables (`limits.max_concurrent_wizards`, `architect.auto_threshold`).
 - The tick is idempotent — every action is guarded by status checks. Repeating or dropping a tick is safe.
 - Write `.sorcerer/sorcerer.json` via `jq` (NOT bash heredocs) so all field values serialize correctly.
-- Stay terse. After each step emit a one-line status (e.g. `step 3: drained 1 request`). On unrecoverable failure print `TICK_FAILED: step <N> — <reason>` and stop.
+- Stay terse. After each step emit a one-line status (e.g. `step 6: spawned 1 designer`). On unrecoverable failure print `TICK_FAILED: step <N> — <reason>` and stop.
 
 ## User notifications (PushNotification)
 
@@ -30,7 +32,7 @@ The user is not watching the terminal between ticks — events.log is attached o
 - `designer-completed`, `implement-completed`, `feedback-completed`, `review-merge`, `wizard-archived`, `architect-archived`
 - `wizard-throttled`, `wizard-resumed`, `coordinator-resumed`, `provider-throttled` — individual throttles and single-provider rotations are routine recoverable events; only the coordinator-level `coordinator-paused` (which means EVERY slot is exhausted or ambient auth is the only option) warrants attention.
 - Any concurrency-deferred log line.
-- Any "skipped step-N" stub log line.
+- Any `tick: step-N — <reason>` line indicating a step had no preconditioned work this tick.
 
 **Formatting:**
 - One line, under 200 chars (mobile truncates). No markdown.
@@ -169,7 +171,7 @@ The adopted entry carries an `orphan_adopted: true` field. Step 12's stage 6.1 (
 - Skip the `mcp__plugin_linear_linear__get_issue` call when `issue_linear_id` is null, and note "orphan-adopted PR — no Linear issue context" in the evidence.
 - When `worktree_paths[repo]` is empty for any repo, fall back to `gh api repos/<repo>/contents/<path>?ref=<head_sha>` for cited code reads. The diff (`gh pr diff`) is still authoritative for what changed; only the post-PR full-file reads need the fallback.
 
-**This procedure is only applicable to PRs that look like sorcerer wizard output.** Filtering on bot author + branch-pattern (excluding `wip/<uuid>` WIP-preservation branches) is the gate; operator-pushed PRs under the bot identity should not be adopted automatically. If a false adoption happens anyway, an operator can apply a `no-adopt` label to the PR and amend `discover_orphan_prs` to skip labeled PRs (not implemented in the helper above — add `--label '!no-adopt'` to the `gh pr list` filter when this becomes a real failure mode).
+**This procedure is only applicable to PRs that look like sorcerer wizard output.** Filtering on bot author + branch-pattern (excluding `wip/<uuid>` WIP-preservation branches) is the gate; operator-pushed PRs under the bot identity should not be adopted automatically. If a false adoption happens anyway, an operator can apply a `no-adopt` label to the PR and amend `scripts/discover-orphan-prs.sh` to skip labeled PRs (not implemented today — add `--label '!no-adopt'` to the script's `gh pr list` invocation when this becomes a real failure mode).
 
 ## Failed-wizard WIP preservation (for implement / feedback / rebase wizards)
 
@@ -187,9 +189,9 @@ When PR-set recovery returns nothing and the entry is about to transition to `st
 **Procedure** (called from each transition-to-failed site for implement/feedback/rebase wizards):
 
 1. For each `(repo_slug, worktree_path)` in the entry's `repos` × `worktree_paths`:
-   - Call `preserve_wizard_wip <wizard_id> <issue_key> <worktree_path> <repo_slug>`.
-   - On success: record `repo_slug` in a local `wip_pushed` array.
-   - On failure: log `tick: wip-preserve failed for <wizard_id> on <repo_slug>; continuing` to stdout. Do NOT block the failed transition — degraded preservation is better than a hung tick.
+   - Run `bash "$SORCERER_REPO/scripts/preserve-wizard-wip.sh" "<wizard_id>" "<issue_key>" "<worktree_path>" "<repo_slug>"`.
+   - On exit 0: record `repo_slug` in a local `wip_pushed` array.
+   - On exit non-zero: log `tick: wip-preserve failed for <wizard_id> on <repo_slug>; continuing` to stdout. Do NOT block the failed transition — degraded preservation is better than a hung tick.
 2. Set `wip_branch: "wip/<wizard_id>"` on the entry (regardless of push success — operators looking at the entry know to check the branch).
 3. Append to `.sorcerer/events.log`:
    ```json
@@ -258,11 +260,11 @@ is_rate_limited_log() {
 
 Use this helper to populate **only** `providers_state[$P].throttled_until` for the provider — that's the real window during which `$P` will keep returning 429s. Fall back to `now + 300s` only when the helper exits non-zero.
 
-**The wizard's `retry_after` is a SEPARATE concept** — see "Wizard vs provider throttles" immediately below. Do NOT set the wizard's `retry_after` from `extract_reset_iso`.
+**The wizard's `retry_after` is a SEPARATE concept** — see "Wizard vs provider throttles" immediately below. Do NOT set the wizard's `retry_after` from `extract-reset-iso.sh`'s output.
 
 **Wizard vs provider throttles (decoupled).** A 429 means *one provider* is rate-limited, not that the wizard's work has to wait that long. With provider cycling configured, work should resume on the fallback slot as soon as the wizard is respawnable; the provider rotation is what enforces "don't try $P until its window clears", not the wizard's own clock. So:
 
-- **Provider** `providers_state[$P].throttled_until` — the real reset window (parsed via `extract_reset_iso`, fallback `now + 300s`). Spawn-time provider selection consults this.
+- **Provider** `providers_state[$P].throttled_until` — the real reset window (parsed via `scripts/extract-reset-iso.sh`, fallback `now + 300s`). Spawn-time provider selection consults this.
 - **Wizard** `retry_after` — a short fixed cooldown (`now + 60s`, same as the 529 path), independent of which provider 429'd. After 60s the wizard becomes spawnable; `scripts/apply-provider-env.sh` skips the still-throttled `$P` and picks the next available slot.
 
 If every provider is throttled, `paused_until` (set per "Global pause" below) gates the coordinator at the loop level — the wizard's 60s cooldown is harmless under pause because ticks don't run while paused.
@@ -275,7 +277,7 @@ If 429 detected:
 
 1. Mark the entry `status: throttled`, `retry_after: <now + 60s>`. Short fixed cooldown — see "Wizard vs provider throttles (decoupled)" above. Do NOT increment `respawn_count`; throttling isn't a crash.
 2. Increment a `throttle_count` field on the entry (initialize to 0).
-3. **If `<state_dir>/provider` is non-empty** (let its content be `$P`): mark the provider as throttled too — set `.providers_state[$P].throttled_until = <extract_reset_iso output, fallback now + 300s>` (NOT the wizard's `retry_after` value — they're decoupled), `.providers_state[$P].throttle_count += 1`, `.providers_state[$P].last_throttled_at = now`. Append:
+3. **If `<state_dir>/provider` is non-empty** (let its content be `$P`): mark the provider as throttled too — set `.providers_state[$P].throttled_until` to the output of `bash "$SORCERER_REPO/scripts/extract-reset-iso.sh" "<state_dir>/logs/<latest-log>"` (or fall back to `now + 300s` if the script exits non-zero); NOT the wizard's `retry_after` value (they're decoupled). Also `.providers_state[$P].throttle_count += 1`, `.providers_state[$P].last_throttled_at = now`. Append:
    ```json
    {"ts":"...","event":"provider-throttled","provider":"<P>","throttled_until":"<ISO-8601>"}
    ```
@@ -549,7 +551,7 @@ Cases:
   - If `now - started_at < 30s`, too early — skip.
   - Otherwise: **run overload detection first** (see "Rate-limit (429) and overload (529) handling" above). If `is_overloaded_log` matches, follow the 529 path (wizard throttled 60s, NO provider-state change).
   - Then **rate-limit detection**. If `is_rate_limited_log` matches, follow the 429 throttle path (wizard + provider throttled).
-  - Next: **run the PR-set recovery check** (see "PR-set recovery" above). Call `discover_pr_set <branch_name> <repos…>`. If it returns a complete pr_urls map, the wizard completed durably even though it didn't write `pr_urls.json` — write it now, set `status: awaiting-review`, set the entry's `pr_urls` to the discovered map, append a `pr-set-recovered` event with `source: "step5c"`. Do NOT mark failed, do NOT escalate. The next tick's step 12 will evaluate the set normally.
+  - Next: **run the PR-set recovery check** (see "PR-set recovery" above). Run `bash "$SORCERER_REPO/scripts/discover-pr-set.sh" "<branch_name>" "<repo1>" [<repo2> ...]`. On exit 0 (complete pr_urls map printed to stdout): the wizard completed durably even though it didn't write `pr_urls.json` — write it now from the script's stdout, set `status: awaiting-review`, set the entry's `pr_urls` to the discovered map, append a `pr-set-recovered` event with `source: "step5c"`. Do NOT mark failed, do NOT escalate. The next tick's step 12 will evaluate the set normally. On exit 1 (incomplete set): proceed to the failure path below.
   - Only if neither 529 nor 429 was detected AND recovery found no PR set: crashed without writing output. Run **Failed-wizard WIP preservation** (above) BEFORE the status write. Then `status: failed`. Append to `.sorcerer/escalations.log` with `rule: implement-no-output` (or `feedback-no-output`, `rebase-no-output`) and the `wip_branch` value.
 - `pr=present, hb=present` — wizard mid-write; wait for next tick.
 - `hb=present` — wizard still working; step 11c handles staleness.
@@ -1045,7 +1047,7 @@ mtime=$(stat -c %Y <state_dir>/heartbeat 2>/dev/null)
 - If `now - mtime > 300`: heartbeat is stale. **Consult pid liveness (`is_pid_alive`) before deciding**:
   - **Pid is ALIVE** — the implement wizard is still running. Cargo builds, test suites, Sylvan FFI compilations, and long Phase-2 repo exploration can all occupy the claude subprocess for >5 min without heartbeat touches. Do NOT respawn, do NOT touch `respawn_count`, do NOT kill. Log `tick: implement <id>/<issue_key> heartbeat stale <age>s but pid alive; trusting busy wizard`. Slice-37's max-age gate bounds the wait at the configured wall-clock ceiling.
   - **Pid is DEAD** — stale AND gone, a real crash:
-    - **PR-set recovery check (run before respawn).** Call `discover_pr_set <branch_name> <repos…>` (see "PR-set recovery" above). If it returns a complete pr_urls map, the wizard effectively finished its work — the stale heartbeat just means it died during cleanup. Write `pr_urls.json`, set `status: awaiting-review`, set the entry's `pr_urls` to the discovered map, append `pr-set-recovered` with `source: "step11c"`. Do NOT respawn, do NOT increment `respawn_count`.
+    - **PR-set recovery check (run before respawn).** Run `bash "$SORCERER_REPO/scripts/discover-pr-set.sh" "<branch_name>" "<repo1>" [<repo2> ...]` (see "PR-set recovery" above). On exit 0 (complete pr_urls map printed to stdout): the wizard effectively finished its work — the stale heartbeat just means it died during cleanup. Write `pr_urls.json` from the script's stdout, set `status: awaiting-review`, set the entry's `pr_urls` to the discovered map, append `pr-set-recovered` with `source: "step11c"`. Do NOT respawn, do NOT increment `respawn_count`.
     - Only if recovery found no PR set: proceed with the respawn-or-fail path below.
     - `respawn_count == 0`: increment, re-spawn:
       ```bash
@@ -1060,27 +1062,32 @@ mtime=$(stat -c %Y <state_dir>/heartbeat 2>/dev/null)
 
 ### Step 11d — Orphan-PR adoption
 
-Before step 12 runs the merge gate, scan GitHub for **bot-authored PRs on configured repos that no `active_wizards` entry claims**, and synthesize `awaiting-review` entries for them. See "Orphan-PR adoption" above for the failure mode and the helpers; this step wires them into the tick.
+Before step 12 runs the merge gate, scan GitHub for **bot-authored PRs on configured repos that no `active_wizards` entry claims**, and synthesize `awaiting-review` entries for them. The helpers are real shell scripts on disk (NOT functions in this prompt's scope) — invoke them via `bash` exactly as written below.
 
-1. Determine the bot author. Read the App identity from the gh authentication context — `gh api user --jq .login` returns the bot user (e.g. `sorcerer-b3k[bot]`). On installations where the App login isn't directly resolvable, fall back to the literal `app/<App-slug>` form documented in `config.json` under `github.bot_login` (add the field if absent; doctor.sh should warn when it can't be derived).
+**Step 11d is mandatory every tick. It is NOT a feature stub. The two helpers (`scripts/discover-orphan-prs.sh` and `scripts/adopt-orphan-pr.sh`) ship with sorcerer's tooling; you can run them yourself any time via the Bash tool to confirm they exist.** Do not emit `skipped step-11d-orphan-adoption — not yet implemented (helpers absent)` or any equivalent. If the discovery script returns empty output, that's the success path: log `tick: step-11d — 0 open PRs unclaimed, no orphan adoption` and proceed to step 12.
 
-2. Run `discover_orphan_prs "<bot-author>"`. If the output is empty, skip the rest of this step.
+1. **Determine the bot author** — the GitHub App user that opens sorcerer-bot PRs. Run `gh api user --jq .login` (the App's `gh` auth identity); typical output is `sorcerer-b3k[bot]` or similar. If `gh api user` fails (auth blip), abort step 11d for this tick with `tick: step-11d — gh api user failed, deferring` and proceed to step 12.
 
-3. For each line of output (one orphan PR per line):
-   - Call `adopt_orphan_pr "<orphan_json>"`. Capture the synthesized entry from stdout.
-   - Append the entry to `.active_wizards` in `sorcerer.json`. Use `jq` with input piping to avoid clobbering concurrent writes:
-     ```bash
-     tmpf=$(mktemp)
-     jq --argjson entry "$new_entry" '.active_wizards += [$entry]' .sorcerer/sorcerer.json > "$tmpf"
-     mv "$tmpf" .sorcerer/sorcerer.json
-     ```
-   - Log into the coordinator log: `tick: adopted orphan PR <pr_url> as wizard <wid> (issue <SOR-N or "?">, branch <branch>)`.
+2. **Run the discovery script.** Capture its output:
+   ```bash
+   orphan_lines=$(bash "$SORCERER_REPO/scripts/discover-orphan-prs.sh" "<bot-author>")
+   ```
+   The script prints zero or more JSON lines on stdout, one per orphan PR (shape: `{"repo","pr_url","branch","head_sha","issue_key"}`). If `$orphan_lines` is empty, log `tick: step-11d — 0 open PRs unclaimed, no orphan adoption` and skip the rest of this step.
 
-4. **Cap the per-tick adoption count at 5.** If `discover_orphan_prs` returns more than 5, adopt the first 5 (sorted by repo then branch for determinism), log `tick: deferred N orphan-PR adoptions to next tick (per-tick cap)`, and let subsequent ticks pick up the rest. The cap protects against an accidental flood (e.g. someone authors 50 PRs under the bot identity by mistake) and gives the merge gate room to process adopted entries before the next batch lands.
+3. **Cap at 5 adoptions per tick.** If `discover-orphan-prs.sh` produced more than 5 lines, take the first 5 (already sorted by repo then branch for determinism), log `tick: step-11d — deferred N orphan-PR adoptions to next tick (per-tick cap)`, and process only those 5 in step 4 below. The cap bounds accidental floods.
 
-5. **Rate the worktree-materialization step.** If `git worktree add` fails for an orphan, the entry is still added with empty `worktree_paths` — step 12 must fall back to GitHub-API reads, per the contract documented in "Orphan-PR adoption" above. Do NOT block adoption on a worktree failure; an orphan PR with no worktree is still better than an orphan PR the gate ignores.
+4. **For each orphan-PR JSON line**, call the adoption script and merge its result into `sorcerer.json`:
+   ```bash
+   new_entry=$(bash "$SORCERER_REPO/scripts/adopt-orphan-pr.sh" "$orphan_json")
+   tmpf=$(mktemp)
+   jq --argjson entry "$new_entry" '.active_wizards += [$entry]' .sorcerer/sorcerer.json > "$tmpf"
+   mv "$tmpf" .sorcerer/sorcerer.json
+   ```
+   The script handles the heavy lifting: scaffolds the wizard's state dir, attempts worktree materialization from the bare clone, writes `pr_urls.json`, appends a `pr-orphan-adopted` event to `events.log`, and prints the synthesized `active_wizards` entry to stdout. Worktree failure is non-fatal — if `worktree_paths` ends up `{}` for the entry, step 12's stage 6.1 falls back to `gh api repos/.../contents?ref=<sha>` reads.
 
-6. Adopted entries flow into step 12 normally on the *same* tick — once `.active_wizards` has been updated, step 12's `for each active_wizards entry with mode: implement and status: awaiting-review` loop will see them. There's no need to defer adoption to the next tick.
+   Log per adoption: `tick: step-11d — adopted orphan PR <pr_url> as wizard <wid> (issue <SOR-N or "?">, branch <branch>)`.
+
+5. **Adopted entries flow into step 12 on the SAME tick.** Once `.active_wizards` has been updated, step 12's `for each active_wizards entry with mode: implement and status: awaiting-review` loop will see them. There's no need to defer adoption to the next tick.
 
 The `orphan_adopted: true` flag on synthesized entries is informational only at this layer; step 12's stage 6.1 reads it to decide on the Linear-fetch skip and worktree-fallback paths.
 
