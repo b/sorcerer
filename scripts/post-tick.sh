@@ -94,17 +94,30 @@ for entry in "${merging[@]}"; do
   wt_json=$(echo "$entry"    | jq -c '.[6]')
   pr_json=$(echo "$entry"    | jq -c '.[7]')
 
-  # Poll each PR's state.
+  # Poll each PR's state. An empty response (gh auth failure, network blip,
+  # rate limit, etc.) must NOT be conflated with "PR is in some non-terminal
+  # state" — that'd mistakenly route the wizard to merge-blocked. Track the
+  # gh failure as a defer signal and skip the wizard for this tick instead.
   all_merged=1
   any_open=0
+  gh_failed=0
   while IFS= read -r pr_url; do
     [[ -z "$pr_url" ]] && continue
     state=$(gh pr view "$pr_url" --json state --jq .state 2>/dev/null || echo "")
+    if [[ -z "$state" ]]; then
+      gh_failed=1
+      break
+    fi
     if [[ "$state" != "MERGED" ]]; then
       all_merged=0
       [[ "$state" == "OPEN" ]] && any_open=1
     fi
   done < <(echo "$pr_json" | jq -r '.[]')
+
+  if (( gh_failed )); then
+    log "gh pr view failed for $issue_key (wizard $wid); deferring — likely a token/auth blip, retry next tick"
+    continue
+  fi
 
   started_epoch=$(date -u -d "$started_at" +%s 2>/dev/null || echo 0)
 
