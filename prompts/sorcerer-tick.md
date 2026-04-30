@@ -410,129 +410,15 @@ Cases:
 - `pr=present, hb=present` — wizard mid-write; wait for next tick.
 - `hb=present` — wizard still working; step 11c handles staleness.
 
-#### 5d. Architect-review spawn + completion
+#### 5d/5e. Review-wizard spawn + completion (lazy-loaded)
 
-**Spawn (when an architect just transitioned to `awaiting-architect-review`):**
+**Lazy-loaded.** If ANY of the following is true, Read `$SORCERER_REPO/prompts/tick-step-5-review-wizards.md` and follow it:
 
-For each `active_architects` entry with `status: awaiting-architect-review` AND no `review_wizard_id` set yet:
+- An `active_architects` entry has `status: awaiting-architect-review` (5d spawn) OR `architect-review-running`
+- An `active_wizards` entry has `mode: design` and `status: awaiting-design-review` (5e spawn) OR `mode: design` and `status: design-review-running`
+- An `active_wizards` entry has `mode: architect-review | design-review` and `status: running | throttled`
 
-1. Generate UUID: `uuidgen`. This is the reviewer's wizard id.
-2. `mkdir -p .sorcerer/wizards/<reviewer-id>/logs`
-3. Spawn the reviewer:
-   ```bash
-   nohup bash scripts/spawn-wizard.sh architect-review \
-     --wizard-id <reviewer-id> \
-     --subject-id <arch-id> \
-     --subject-state-dir .sorcerer/architects/<arch-id> \
-     > .sorcerer/wizards/<reviewer-id>/logs/spawn.txt 2>&1 &
-   echo $!
-   ```
-4. Capture pid. Append to `active_wizards`:
-   ```json
-   {
-     "id": "<reviewer-id>", "mode": "architect-review", "status": "running",
-     "started_at": "<ISO-8601 now>",
-     "subject_id": "<arch-id>", "subject_kind": "architect",
-     "review_decision": null, "review_file": null,
-     "pid": <pid>, "respawn_count": 0
-   }
-   ```
-5. Update the architect entry: `status: architect-review-running`, `review_wizard_id: <reviewer-id>`.
-6. Append:
-   ```json
-   {"ts":"...","event":"architect-review-spawned","id":"<reviewer-id>","subject_id":"<arch-id>","pid":12345}
-   ```
-
-Concurrency: counts toward `max_concurrent_wizards`. If at the cap, leave the architect at `awaiting-architect-review` and pick up next tick.
-
-**Completion detection (when the reviewer wizard's spawn process exits):**
-
-For each `active_wizards` entry with `mode: architect-review` and `status: running`:
-
-```bash
-test -f .sorcerer/wizards/<reviewer-id>/heartbeat && hb_file=present || hb_file=absent
-test -f .sorcerer/wizards/<reviewer-id>/review.json && rv=present || rv=absent
-if is_pid_alive "<pid>"; then hb="$hb_file"; else hb=absent; fi
-last_line=$(tail -1 .sorcerer/wizards/<reviewer-id>/logs/spawn.txt 2>/dev/null)
-```
-
-Cases:
-- `hb=absent` AND `rv=present` AND `last_line` starts with `ARCHITECT_REVIEW_OK`:
-  - Read `.sorcerer/wizards/<reviewer-id>/review.json`. Parse `decision` (`approve` | `reject`) and `edits_made` count.
-  - Update reviewer entry: `status: completed`, `review_decision: <decision>`, `review_file: .sorcerer/wizards/<reviewer-id>/review.json`.
-  - Update the parent architect entry (look up by `subject_id`): clear `review_wizard_id`.
-  - On `decision == "approve"`:
-    - Architect entry → `status: awaiting-tier-2`. Step 6 will spawn designers from the (possibly edited) plan.json.
-    - Append:
-      ```json
-      {"ts":"...","event":"architect-review-completed","id":"<reviewer-id>","subject_id":"<arch-id>","decision":"approve","edits":<E>}
-      ```
-  - On `decision == "reject"`:
-    - Architect entry → `status: failed`.
-    - Read `concerns_unfixed` from the review.json. Append to `.sorcerer/escalations.log`:
-      ```bash
-      jq -nc \
-        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        --arg wizard_id "<arch-id>" \
-        --arg rule "architect-review-rejected" \
-        --slurpfile review .sorcerer/wizards/<reviewer-id>/review.json \
-        '{ts:$ts, wizard_id:$wizard_id, mode:"architect", issue_key:null, pr_urls:null, rule:$rule,
-          attempted: ($review[0].summary // ""),
-          needs_from_user: ("Review reviewer concerns and decide: edit request, edit plan.json by hand, or rerun architect with revised request. Reviewer concerns: " + ($review[0].concerns_unfixed | tostring)),
-          review_file: "<path to review.json>"}' \
-        >> .sorcerer/escalations.log
-      ```
-    - Append `architect-review-completed` event with `decision: "reject"`.
-- `hb=absent` AND `last_line` starts with `ARCHITECT_REVIEW_FAILED`:
-  - Reviewer reported its own failure. Update reviewer `status: failed`, parent architect `status: failed`. Escalate with `rule: architect-review-self-reported-failure`.
-- `hb=absent` AND `rv=absent` AND no completion marker:
-  - Run the 429 check (load `$SORCERER_REPO/prompts/tick-rate-limit-handling.md`). If 429 detected, take the throttle path on the reviewer entry (do NOT touch the parent architect's status — it stays at `architect-review-running`).
-  - Else if `now - started_at < 30s`, too early — skip.
-  - Else: crashed without output. Reviewer `status: failed`, parent architect `status: failed`. Escalate with `rule: architect-review-no-output`.
-- `rv=present, hb=present` — reviewer mid-write; wait next tick.
-- `hb=present` — still working; step 11 handles staleness (treat reviewer wizards under the same 5-min heartbeat rule as designer wizards in step 11b).
-
-#### 5e. Design-review spawn + completion
-
-**Spawn (when a designer just transitioned to `awaiting-design-review`):**
-
-For each `active_wizards` entry with `mode: design` and `status: awaiting-design-review` AND no `review_wizard_id` set yet:
-
-1. Generate UUID for the reviewer.
-2. `mkdir -p .sorcerer/wizards/<reviewer-id>/logs`
-3. Look up the designer's `architect_id` and `sub_epic_name` (from the designer entry's existing fields).
-4. Spawn the reviewer:
-   ```bash
-   nohup bash scripts/spawn-wizard.sh design-review \
-     --wizard-id <reviewer-id> \
-     --subject-id <designer-id> \
-     --subject-state-dir .sorcerer/wizards/<designer-id> \
-     --architect-plan-file .sorcerer/architects/<arch-id>/plan.json \
-     --sub-epic-name "<sub_epic_name>" \
-     > .sorcerer/wizards/<reviewer-id>/logs/spawn.txt 2>&1 &
-   echo $!
-   ```
-5. Append to `active_wizards`:
-   ```json
-   {
-     "id": "<reviewer-id>", "mode": "design-review", "status": "running",
-     "started_at": "<ISO-8601 now>",
-     "subject_id": "<designer-id>", "subject_kind": "designer",
-     "review_decision": null, "review_file": null,
-     "pid": <pid>, "respawn_count": 0
-   }
-   ```
-6. Update the designer entry: `status: design-review-running`, `review_wizard_id: <reviewer-id>`.
-7. Append `design-review-spawned` event.
-
-Concurrency cap honored (same as 5d).
-
-**Completion detection** is symmetric to 5d:
-- `DESIGN_REVIEW_OK` + `review.json` present + `decision: approve` → designer `status: awaiting-tier-3`. Step 8 dispatches implement wizards from the (possibly edited) manifest.
-- `decision: reject` → designer `status: failed`, escalate with `rule: design-review-rejected`.
-- `DESIGN_REVIEW_FAILED` → escalate with `rule: design-review-self-reported-failure`.
-- 429 → throttle path, reviewer entry only; designer stays at `design-review-running`.
-- No-output crash → escalate with `rule: design-review-no-output`.
+Otherwise emit `tick: step-5d/5e — no review-wizard work this tick` and proceed to step 6. The body covers spawn (architect-review for awaiting-architect-review architects, design-review for awaiting-design-review designers), completion detection (`*_REVIEW_OK` / `*_REVIEW_FAILED` / no-output), the reject-path escalation jq, and the 429 throttle path on reviewer entries.
 
 ### Step 6 — Spawn designers
 
@@ -597,37 +483,7 @@ For each `active_architects` entry with `status: awaiting-tier-2`:
 
 ### Step 7 — Standalone-issue sweeper (orphaned-Linear-issue catcher)
 
-**Cadence:** run only when `tick_count % 30 == 0` (skip with stdout `tick: step-7-sweep skipped (next at tick N)` otherwise). Sorcerer doesn't track tick_count durably; derive from `events.log` line count modulo 30, or from a local counter on the in-memory tick state. Quiet on the happy path.
-
-**Purpose.** Cluster-4-of-the-audit fix. The 2026-04-26 SOR-407/408/409/410 case: four Urgent issues filed standalone in Linear without an architect chain → invisible to the dispatch pool until an operator manually submitted a sorcerer request. This sweeper auto-catches that shape.
-
-**Procedure (run only at the cadence above):**
-
-1. List all SOR issues in `state:Backlog` OR `state:"In Progress"` with `priority IN (1, 2)` (Urgent, High) via `mcp__plugin_linear_linear__list_issues` (team=SOR, limit=250). If the Linear MCP is needs-auth, log `tick: step-7-sweep skipped — Linear MCP needs-auth` and return.
-2. Build the set of `linear_id` values that appear in any active manifest: scan `.sorcerer/wizards/*/manifest.json` for `issues[*].linear_id`. Also include `linear_id`s of any active architect's plan whose sub-epics' mandates cite the issue (since the architect's plan is upstream of the manifest).
-3. For each Urgent/High Linear issue NOT in the active set: this is an orphaned issue.
-4. If the orphaned-set is non-empty, emit ONE consolidated event:
-   ```json
-   {"ts":"...","event":"orphan-issues-detected","priority_high_or_urgent":N,"issue_keys":["SOR-X","SOR-Y",...]}
-   ```
-5. Auto-file a sorcerer request to incorporate the orphans into a fresh architect run, BUT only when:
-   - The orphan set is **stable across two consecutive sweeps** (recorded via a marker file `.sorcerer/orphan-sweep-prev.json` containing the prior sweep's `issue_keys` array). This avoids racing the operator who's mid-flight filing related issues.
-   - The orphan set has at least one Urgent (priority=1) issue.
-   - No active architect is currently processing the same `issue_keys` (re-scan plans).
-
-   When all three hold, write a request file under `.sorcerer/requests/<ts>-orphan-issues-<keys-joined>.md` with body:
-   ```
-   Auto-generated by step-7 standalone-issue sweeper on <ts>.
-
-   The following Urgent / High Linear issues are not part of any active architect plan or designer manifest. They've been orphaned for at least two sweep cycles (~60 ticks). Decompose them into a single architect run with appropriate sub-epic boundaries:
-
-   - SOR-NNN — <title> — priority <Urgent|High>
-   - SOR-MMM — ...
-   ```
-   Step 3 will pick this up on the same tick and route to a new architect.
-6. Update `.sorcerer/orphan-sweep-prev.json` with the current sweep's `issue_keys` for next-cycle comparison.
-
-**Quiet on the happy path.** No events / requests when the orphan set is empty or hasn't been stable for 2 cycles.
+**Lazy-loaded.** Cadence-gated: run only when `tick_count % 30 == 0` (derive from `events.log` line count modulo 30 or a local counter). When the cadence fires, Read `$SORCERER_REPO/prompts/tick-step-7-orphan-issue-sweep.md` and follow it. Otherwise emit `tick: step-7-sweep skipped (next at tick N)` and proceed to step 8. The body covers the Linear scan, active-set construction, the two-sweep stability gate, and the auto-file-request rule.
 
 ### Step 8 — Decide implement actions
 
@@ -916,34 +772,13 @@ mtime=$(stat -c %Y <state_dir>/heartbeat 2>/dev/null)
 
 ### Step 11d — Orphan-PR adoption
 
-Before step 12 runs the merge gate, scan GitHub for **bot-authored PRs on configured repos that no `active_wizards` entry claims**, and synthesize `awaiting-review` entries for them. The helpers are real shell scripts on disk (NOT functions in this prompt's scope) — invoke them via `bash` exactly as written below.
+**Mandatory every tick.** Before step 12 runs the merge gate, scan GitHub for bot-authored PRs no `active_wizards` entry claims:
 
-**Step 11d is mandatory every tick. It is NOT a feature stub. The two helpers (`scripts/discover-orphan-prs.sh` and `scripts/adopt-orphan-pr.sh`) ship with sorcerer's tooling; you can run them yourself any time via the Bash tool to confirm they exist.** Do not emit `skipped step-11d-orphan-adoption — not yet implemented (helpers absent)` or any equivalent. If the discovery script returns empty output, that's the success path: log `tick: step-11d — 0 open PRs unclaimed, no orphan adoption` and proceed to step 12.
+1. `bot=$(gh api user --jq .login)` — on failure, log `tick: step-11d — gh api user failed, deferring` and proceed to step 12.
+2. `orphan_lines=$(bash "$SORCERER_REPO/scripts/discover-orphan-prs.sh" "$bot")` — on empty output, log `tick: step-11d — 0 open PRs unclaimed, no orphan adoption` and proceed to step 12.
+3. **If `$orphan_lines` is non-empty**: Read `$SORCERER_REPO/prompts/tick-orphan-pr-adoption.md` and follow its "Step 11d imperative procedure" section — it covers the 5-adoption-per-tick cap, the per-line `adopt-orphan-pr.sh` invocation, the jq merge into `active_wizards`, and the `orphan_adopted: true` flag semantics that step 12 keys off.
 
-1. **Determine the bot author** — the GitHub App user that opens sorcerer-bot PRs. Run `gh api user --jq .login` (the App's `gh` auth identity); typical output is `sorcerer-b3k[bot]` or similar. If `gh api user` fails (auth blip), abort step 11d for this tick with `tick: step-11d — gh api user failed, deferring` and proceed to step 12.
-
-2. **Run the discovery script.** Capture its output:
-   ```bash
-   orphan_lines=$(bash "$SORCERER_REPO/scripts/discover-orphan-prs.sh" "<bot-author>")
-   ```
-   The script prints zero or more JSON lines on stdout, one per orphan PR (shape: `{"repo","pr_url","branch","head_sha","issue_key"}`). If `$orphan_lines` is empty, log `tick: step-11d — 0 open PRs unclaimed, no orphan adoption` and skip the rest of this step.
-
-3. **Cap at 5 adoptions per tick.** If `discover-orphan-prs.sh` produced more than 5 lines, take the first 5 (already sorted by repo then branch for determinism), log `tick: step-11d — deferred N orphan-PR adoptions to next tick (per-tick cap)`, and process only those 5 in step 4 below. The cap bounds accidental floods.
-
-4. **For each orphan-PR JSON line**, call the adoption script and merge its result into `sorcerer.json`:
-   ```bash
-   new_entry=$(bash "$SORCERER_REPO/scripts/adopt-orphan-pr.sh" "$orphan_json")
-   tmpf=$(mktemp)
-   jq --argjson entry "$new_entry" '.active_wizards += [$entry]' .sorcerer/sorcerer.json > "$tmpf"
-   mv "$tmpf" .sorcerer/sorcerer.json
-   ```
-   The script handles the heavy lifting: scaffolds the wizard's state dir, attempts worktree materialization from the bare clone, writes `pr_urls.json`, appends a `pr-orphan-adopted` event to `events.log`, and prints the synthesized `active_wizards` entry to stdout. Worktree failure is non-fatal — if `worktree_paths` ends up `{}` for the entry, step 12's stage 6.1 falls back to `gh api repos/.../contents?ref=<sha>` reads.
-
-   Log per adoption: `tick: step-11d — adopted orphan PR <pr_url> as wizard <wid> (issue <SOR-N or "?">, branch <branch>)`.
-
-5. **Adopted entries flow into step 12 on the SAME tick.** Once `.active_wizards` has been updated, step 12's `for each active_wizards entry with mode: implement and status: awaiting-review` loop will see them. There's no need to defer adoption to the next tick.
-
-The `orphan_adopted: true` flag on synthesized entries is informational only at this layer; step 12's stage 6.1 reads it to decide on the Linear-fetch skip and worktree-fallback paths.
+The two helpers (`scripts/discover-orphan-prs.sh`, `scripts/adopt-orphan-pr.sh`) ship with sorcerer's tooling — never emit `skipped step-11d-orphan-adoption — not yet implemented (helpers absent)` or any equivalent. Empty discovery output is the success path, not a missing-helper signal.
 
 ### Step 12 — PR-set review and merge
 
