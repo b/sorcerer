@@ -128,167 +128,14 @@ fi
 
 From here the existing `hb=present` / `hb=absent` branches work unchanged — a dead PID with a leftover heartbeat routes through the same paths as a clean "heartbeat was removed on exit".
 
-## PR-set recovery (for implement / feedback / rebase wizards)
+## Lazy-loaded procedures (Read on demand)
 
-A wizard can do real work — push commits, open PRs — and then die before writing its completion marker or removing the heartbeat (crash, OOM, the claude subprocess itself hitting a limit mid-sentence, machine reboot, etc). The cheap-but-wrong move is to mark the entry `failed` and escalate. The right move is to check GitHub first: **if every repo in the wizard's `repos` has an open PR on its `branch_name`, the wizard's output is already durable — reconstruct `pr_urls.json` from `gh` and transition the entry to `awaiting-review`**. Step 12 will re-evaluate the set and do the appropriate next thing (merge / refer-back / rebase) on its own terms.
+The following procedures are extracted to separate prompt files. Read each only when its precondition fires; on the common tick (no failed wizards, no orphan PRs, no rate-limit errors) you don't pay tokens for any of them.
 
-**Helper** (used in step 5c's "crashed without writing output" path and step 11c's stale-heartbeat respawn path):
-
-- `bash $SORCERER_REPO/scripts/discover-pr-set.sh <branch_name> <repo1> [<repo2> ...]`
-  - On success (every named repo has an open PR for `<branch_name>`): prints `{"<owner/name>": "<pr_url>", ...}` JSON to stdout, exits 0.
-  - On any missing PR (incomplete set): prints nothing, exits 1.
-  - Repos are passed in `github.com/owner/name` form (the prefix is stripped internally).
-
-**Recovery action** (when discover-pr-set succeeded — write pr_urls.json, transition to awaiting-review, append event):
-
-```bash
-echo "$pr_set_json" > "$state_dir/pr_urls.json"
-# Update the entry: status=awaiting-review, pr_urls=<pr_set_json>
-printf '{"ts":"%s","event":"pr-set-recovered","id":"%s","issue_key":"%s","pr_count":%d,"source":"<step5|step11>"}\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$wizard_id" "$issue_key" "$pr_count" >> .sorcerer/events.log
-```
-
-This is only applicable to `mode: implement | feedback | rebase` wizards — the ones that have `branch_name` + `repos` + `state_dir` fields. Architect and designer wizards produce plan/manifest files locally and don't have a PR fallback, so they stay on the original failed/respawn path.
-
-## Orphan-PR adoption (for PRs whose owning wizard was pruned)
-
-`discover_pr_set` above only helps wizards that are *still* in `active_wizards` but went stale. It does NOT help when the wizard's `active_wizards` entry has been removed entirely — by an operator who manually edited `sorcerer.json`, by a state-file rewrite that dropped completed/failed entries before the PR was reviewed, by a crash that killed the entry write *between* opening the PR and persisting the entry, etc. In those cases the PR sits open on GitHub but is invisible to the tick: step 12 iterates `active_wizards` and finds nothing for that PR, so the merge gate never runs.
-
-The fix is to scan GitHub once per tick for **open bot-authored PRs on configured repos that no `active_wizards` entry claims**, and synthesize an `awaiting-review` entry so step 12 picks them up on its own terms.
-
-**Helpers** (extracted; the tick invokes these via Bash):
-
-- `bash $SORCERER_REPO/scripts/discover-orphan-prs.sh <bot_author> [project_root]`
-  - Prints zero or more JSON lines on stdout, one per orphan PR:
-    `{"repo":"<owner/name>","pr_url":"...","branch":"...","head_sha":"...","issue_key":"<SOR-N|null>"}`
-  - Filters out wip/<uuid> branches and any branch/URL already claimed by an active_wizards entry.
-  - Always exits 0.
-- `bash $SORCERER_REPO/scripts/adopt-orphan-pr.sh <orphan_json> [project_root]`
-  - Creates `.sorcerer/wizards/<wid>/` scaffold, attempts worktree materialization from the bare clone, writes `pr_urls.json`, appends a `pr-orphan-adopted` event, prints the synthesized `active_wizards` entry to stdout.
-  - Worktree failure is non-fatal: the entry is written with empty `worktree_paths` and the step 12 gate falls back to GitHub-API reads.
-
-The adopted entry carries an `orphan_adopted: true` field. Step 12's stage 6.1 (gather full review materials) MUST check this field and:
-- Skip the `mcp__plugin_linear_linear__get_issue` call when `issue_linear_id` is null, and note "orphan-adopted PR — no Linear issue context" in the evidence.
-- When `worktree_paths[repo]` is empty for any repo, fall back to `gh api repos/<repo>/contents/<path>?ref=<head_sha>` for cited code reads. The diff (`gh pr diff`) is still authoritative for what changed; only the post-PR full-file reads need the fallback.
-
-**This procedure is only applicable to PRs that look like sorcerer wizard output.** Filtering on bot author + branch-pattern (excluding `wip/<uuid>` WIP-preservation branches) is the gate; operator-pushed PRs under the bot identity should not be adopted automatically. If a false adoption happens anyway, an operator can apply a `no-adopt` label to the PR and amend `scripts/discover-orphan-prs.sh` to skip labeled PRs (not implemented today — add `--label '!no-adopt'` to the script's `gh pr list` invocation when this becomes a real failure mode).
-
-## Failed-wizard WIP preservation (for implement / feedback / rebase wizards)
-
-When PR-set recovery returns nothing and the entry is about to transition to `status: failed`, the wizard's worktree may still hold uncommitted work — the SOR-381 case: an implement that finished its diff in-tree but couldn't run the workspace gates (host disk full) and reported `IMPLEMENT_FAILED` without committing. The default cleanup path destroys that diff. This procedure preserves it as a `wip/<wizard-id>` branch on GitHub before any cleanup runs, so an operator (or a future re-spawn) can recover the work or audit what the wizard actually produced.
-
-**MUST run on every transition to `status: failed`** for `mode in {implement, feedback, rebase}` BEFORE any cleanup or `status` write. Side-effects are best-effort (a push that fails for auth/network reasons shouldn't block the failed transition), but the attempt is mandatory — a wizard whose `wip_branch` field is missing on a failed entry MUST have had this procedure attempted.
-
-**Helper:**
-
-- `bash $SORCERER_REPO/scripts/preserve-wizard-wip.sh <wizard_id> <issue_key> <worktree_path> <repo_slug>`
-  - Mints a token for the repo owner, stages the worktree (`git add -A`), commits any pending diff with the sorcerer identity, and force-pushes to `wip/<wizard_id>` on `<repo_slug>` (e.g. `etherpilot-ai/archers`).
-  - Idempotent: if there's nothing new to commit, the script no-ops the commit step and still re-pushes the existing tip.
-  - Exit 0 on push success, 1 on any failure (worktree missing, token mint failure, commit failure, push failure).
-
-**Procedure** (called from each transition-to-failed site for implement/feedback/rebase wizards):
-
-1. For each `(repo_slug, worktree_path)` in the entry's `repos` × `worktree_paths`:
-   - Run `bash "$SORCERER_REPO/scripts/preserve-wizard-wip.sh" "<wizard_id>" "<issue_key>" "<worktree_path>" "<repo_slug>"`.
-   - On exit 0: record `repo_slug` in a local `wip_pushed` array.
-   - On exit non-zero: log `tick: wip-preserve failed for <wizard_id> on <repo_slug>; continuing` to stdout. Do NOT block the failed transition — degraded preservation is better than a hung tick.
-2. Set `wip_branch: "wip/<wizard_id>"` on the entry (regardless of push success — operators looking at the entry know to check the branch).
-3. Append to `.sorcerer/events.log`:
-   ```json
-   {"ts":"...","event":"wizard-wip-preserved","id":"<wizard-id>","issue_key":"<SOR-N>","mode":"<mode>","wip_branch":"wip/<wizard-id>","repos_pushed":["<repo_slug>",...],"repos_failed":["<repo_slug>",...]}
-   ```
-4. Then proceed with the existing `status: failed` write + escalation as the calling site already specifies.
-
-This procedure is **only applicable to `mode: implement | feedback | rebase`** — architect / designer / reviewer wizards have no worktree to preserve.
-
-## Rate-limit (429) and overload (529) handling
-
-Every wizard spawn is a `claude -p` subprocess. When Anthropic throttles or its servers are overloaded, claude auto-retries internally; if it still can't get through, it exits non-zero. Two distinct failure modes with different recovery:
-
-### 529 — server-side overload (transient, service-wide)
-
-Log shape:
-- `API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment.`
-- `"type": "overloaded_error"`
-
-Key property: 529 is Anthropic's backend saying "I'm busy right now." It applies equally to every provider (Max A, Max B, API keys, Bedrock, Vertex — they all hit the same upstream). Cycling providers does NOT help. The right response is a short retry after a brief cooldown.
-
-**Detection helper**:
-```bash
-is_overloaded_log() {
-  local log="$1"
-  grep -qE "API Error: 529|\"type\":[[:space:]]*\"overloaded_error\"|529 Overloaded" "$log" 2>/dev/null
-}
-```
-
-**Recovery when detected**:
-1. Mark the wizard entry `status: throttled`, `retry_after: <now + 60s>`. Shorter than 429's 5-min default — 529 typically clears fast.
-2. Increment a dedicated `overload_count` on the entry (initialize to 0). Do NOT increment `throttle_count` (that's for 429 strikes).
-3. **Do NOT touch `providers_state`** — the provider isn't the problem, the upstream service is.
-4. `overload_count >= 15` → this is an Anthropic status-page issue, not something recovery cycles will fix. For `mode in {implement, feedback, rebase}`: run **Failed-wizard WIP preservation** (above) BEFORE the status write. Then escalate with `rule: persistent-server-overload` and set the wizard `status: failed`. Point the user at https://status.claude.com in `needs_from_user`.
-5. Append to events.log:
-   ```json
-   {"ts":"...","event":"wizard-overloaded","id":"<id>","mode":"<mode>","retry_after":"<ISO-8601>","overload_count":<N>}
-   ```
-
-### 429 — rate limit (account-specific)
-
-Log shape:
-- `You've hit your limit · resets <when>` — Max-subscription OAuth session runs out of its 5-hour bucket. No HTTP status visible, just this line.
-- `API Error: Request rejected (429)` — API-key path.
-- `"type": "rate_limit_error"` — structured API error.
-- `rate limit` (case-insensitive) in any other error-shaped line.
-
-Key property: 429 is account-specific. Cycling to a different provider DOES help. Mark both the wizard AND the provider throttled.
-
-**Detection helper**:
-```bash
-is_rate_limited_log() {
-  local log="$1"
-  grep -qE "You've hit your limit|Request rejected \(429\)|\"type\":[[:space:]]*\"rate_limit_error\"|rate.limit.*exceeded" "$log" 2>/dev/null
-}
-```
-
-**Classification order** in step 5 failure paths: `is_overloaded_log` first (529 can arrive with no other markers), then `is_rate_limited_log`, then the other recovery paths. They're mutually exclusive — a log doesn't typically contain both.
-
-**Extract reset timestamp when available.** The Max-subscription variant prints a concrete reset time; parsing it gives a much better `throttled_until` than the 5-minute default. Helper:
-
-- `bash $SORCERER_REPO/scripts/extract-reset-iso.sh <log_path>`
-  - Parses the "resets <when> (<tz>)" line from a wizard log (both absolute "Apr 24, 1am (UTC)" and relative "1am (UTC)" shapes; tolerates `:30` minutes; rolls forward one day if the relative form has already passed).
-  - On success: ISO-8601 UTC timestamp on stdout, exit 0.
-  - On any failure (no resets line, can't parse, parsed time still in past after rollover): no output, exit 1.
-
-Use this helper to populate **only** `providers_state[$P].throttled_until` for the provider — that's the real window during which `$P` will keep returning 429s. Fall back to `now + 300s` only when the helper exits non-zero.
-
-**The wizard's `retry_after` is a SEPARATE concept** — see "Wizard vs provider throttles" immediately below. Do NOT set the wizard's `retry_after` from `extract-reset-iso.sh`'s output.
-
-**Wizard vs provider throttles (decoupled).** A 429 means *one provider* is rate-limited, not that the wizard's work has to wait that long. With provider cycling configured, work should resume on the fallback slot as soon as the wizard is respawnable; the provider rotation is what enforces "don't try $P until its window clears", not the wizard's own clock. So:
-
-- **Provider** `providers_state[$P].throttled_until` — the real reset window (parsed via `scripts/extract-reset-iso.sh`, fallback `now + 300s`). Spawn-time provider selection consults this.
-- **Wizard** `retry_after` — a short fixed cooldown (`now + 60s`, same as the 529 path), independent of which provider 429'd. After 60s the wizard becomes spawnable; `scripts/apply-provider-env.sh` skips the still-throttled `$P` and picks the next available slot.
-
-If every provider is throttled, `paused_until` (set per "Global pause" below) gates the coordinator at the loop level — the wizard's 60s cooldown is harmless under pause because ticks don't run while paused.
-
-The previous design tied the wizard's `retry_after` to the provider's reset, which made the wizard sit through `$P`'s full window even when a fallback provider was wide open. That's the bug this guidance fixes.
-
-**Which provider ran this wizard?** Read `<state_dir>/provider` (written by `scripts/spawn-wizard.sh` at spawn time). When empty or missing, `config.json:providers` is unconfigured and there's nothing to mark throttled — only the wizard itself gets the `throttled` status.
-
-If 429 detected:
-
-1. Mark the entry `status: throttled`, `retry_after: <now + 60s>`. Short fixed cooldown — see "Wizard vs provider throttles (decoupled)" above. Do NOT increment `respawn_count`; throttling isn't a crash.
-2. Increment a `throttle_count` field on the entry (initialize to 0).
-3. **If `<state_dir>/provider` is non-empty** (let its content be `$P`): mark the provider as throttled too — set `.providers_state[$P].throttled_until` to the output of `bash "$SORCERER_REPO/scripts/extract-reset-iso.sh" "<state_dir>/logs/<latest-log>"` (or fall back to `now + 300s` if the script exits non-zero); NOT the wizard's `retry_after` value (they're decoupled). Also `.providers_state[$P].throttle_count += 1`, `.providers_state[$P].last_throttled_at = now`. Append:
-   ```json
-   {"ts":"...","event":"provider-throttled","provider":"<P>","throttled_until":"<ISO-8601>"}
-   ```
-4. If `throttle_count >= 3` on the WIZARD entry: for `mode in {implement, feedback, rebase}` run **Failed-wizard WIP preservation** (above) BEFORE the status write. Then escalate with `rule: persistent-throttle`, `mode: <mode>`, `issue_key: <SOR-N or null>`, and set `status: failed`. The 3-strike rule is per-wizard, not per-provider — a provider that throttles many different wizards is working as intended (cycling kicks in). A single wizard that throttles three times across all providers suggests something deeper.
-5. Append `{"ts":"...","event":"wizard-throttled","id":"<id>","mode":"<mode>","provider":"<P or null>","retry_after":"<ISO-8601>","throttle_count":<N>}` to events.log.
-
-**Provider cycling (strict primary → fallback)**: when the tick spawns a wizard, `scripts/spawn-wizard.sh` automatically picks the first provider in `config.providers` whose `providers_state[name].throttled_until` is null or in the past. The tick itself doesn't need to choose — just rely on the spawn script. Rotation happens on the next spawn; the current wizard finishes (or throttles again) first.
-
-**Global pause** (all-slots-exhausted): if EVERY provider in `config.providers` is currently throttled, set `sorcerer.json:paused_until` to the earliest `providers_state[*].throttled_until` (the first slot that will reopen). Append `{"ts":"...","event":"coordinator-paused","paused_until":"<ISO-8601>","reason":"all-providers-throttled"}` and `coordinator-loop.sh` sleeps until then. If `providers` is unconfigured and three wizards throttle in one tick (legacy single-slot behavior), still set `paused_until = now + 900s` with `reason: "rate-limit-storm"` — the ambient-auth case.
-
-**Resuming**: steps 11a/b/c treat `status: throttled` identically to `status: stale`, but the trigger is `now >= retry_after` instead of heartbeat age, and respawn_count is NOT consulted or incremented. Provider-level resume is implicit: `scripts/apply-provider-env.sh` skips throttled providers on every spawn; when a slot's `throttled_until` passes, it's eligible again automatically.
+- **PR-set recovery** — when an implement/feedback/rebase wizard exited or went stale without writing its completion marker AND has `branch_name` + `repos` set, check whether GitHub already holds the wizard's PR set before failing the entry. Read `$SORCERER_REPO/prompts/tick-pr-set-recovery.md`. Helper entry point: `scripts/discover-pr-set.sh`.
+- **Orphan-PR adoption** — when step 11d's orphan scan returns one or more rows, for each row decide whether to synthesize an `awaiting-review` entry. Read `$SORCERER_REPO/prompts/tick-orphan-pr-adoption.md`. Helper entry points: `scripts/discover-orphan-prs.sh` (already invoked by step 11d) and `scripts/adopt-orphan-pr.sh`. Carries the `orphan_adopted: true` field semantics that stage 6.1 of step 12 keys off.
+- **Failed-wizard WIP preservation** — before writing `status: failed` on any implement/feedback/rebase wizard with worktree mutations, push the worktree to a `wip/<wizard-id>` branch so the diff isn't destroyed by cleanup. Read `$SORCERER_REPO/prompts/tick-failed-wizard-wip.md`. Helper entry point: `scripts/preserve-wizard-wip.sh`. **MUST be attempted on every transition to `status: failed` for those modes.**
+- **Rate-limit (429) and overload (529) handling** — when a wizard's claude subprocess exits non-zero with a rate-limit or overload marker in its log (`is_rate_limited_log` / `is_overloaded_log` detect these), Read `$SORCERER_REPO/prompts/tick-rate-limit-handling.md`. Covers wizard-vs-provider throttle semantics, the 3-strike persistence rule, the global-pause `paused_until` setter, and the `extract-reset-iso.sh` helper.
 
 ## State files
 
@@ -464,7 +311,7 @@ Cases:
   - Update entry: `status: awaiting-architect-review`, `plan_file: .sorcerer/architects/<id>/plan.json`. The next step (5d, below) will spawn the reviewer.
 - `pl=absent, hb=absent` — possible failure:
   - If `now - started_at < 30s`, too early to judge. Skip.
-  - Otherwise: **run overload detection first** (see "Rate-limit (429) and overload (529) handling" above). If `is_overloaded_log` matches, follow the 529 path (wizard throttled 60s, NO provider-state change).
+  - Otherwise: **run overload detection first** (load `$SORCERER_REPO/prompts/tick-rate-limit-handling.md`). If `is_overloaded_log` matches, follow the 529 path (wizard throttled 60s, NO provider-state change).
   - Then **rate-limit detection**. If `is_rate_limited_log` matches, follow the 429 throttle path (wizard + provider throttled).
   - Only if neither 529 nor 429 was detected: `status: failed`. Append an escalation:
     ```bash
@@ -502,7 +349,7 @@ Cases:
   - Update entry: `status: awaiting-design-review`, `manifest_file: .sorcerer/wizards/<id>/manifest.json`, `epic_linear_id: <id>`. The next step (5e, below) will spawn the reviewer.
 - `mf=absent, hb=absent`:
   - If `now - started_at < 30s`, too early to judge. Skip.
-  - Otherwise: **run overload detection first** (see "Rate-limit (429) and overload (529) handling" above). If `is_overloaded_log` matches, follow the 529 path (wizard throttled 60s, NO provider-state change).
+  - Otherwise: **run overload detection first** (load `$SORCERER_REPO/prompts/tick-rate-limit-handling.md`). If `is_overloaded_log` matches, follow the 529 path (wizard throttled 60s, NO provider-state change).
   - Then **rate-limit detection**. If `is_rate_limited_log` matches, follow the 429 throttle path (wizard + provider throttled).
   - Only if neither 529 nor 429 was detected: `status: failed`. Append an escalation:
     ```bash
@@ -553,13 +400,13 @@ Cases:
     ```
   - Update entry: `status: awaiting-review` (step 12 will re-evaluate the PR set next tick). Leave `pr_urls` as-is.
 - `hb=absent` AND `last_line` starts with `IMPLEMENT_FAILED`, `FEEDBACK_FAILED`, or `REBASE_FAILED`:
-  - Wizard reported its own failure. Run **Failed-wizard WIP preservation** (above) BEFORE the status write — the wizard's worktree may hold uncommitted work (the canonical SOR-381 case: `IMPLEMENT_FAILED: host disk full`, real diff in-tree, never committed). Then update `status: failed`. Append to `.sorcerer/escalations.log` with `rule: <implement|feedback|rebase>-self-reported-failure`, include the wizard's failure reason and the `wip_branch` value.
+  - Wizard reported its own failure. Run **Failed-wizard WIP preservation** (load `$SORCERER_REPO/prompts/tick-failed-wizard-wip.md`) BEFORE the status write — the wizard's worktree may hold uncommitted work (the canonical SOR-381 case: `IMPLEMENT_FAILED: host disk full`, real diff in-tree, never committed). Then update `status: failed`. Append to `.sorcerer/escalations.log` with `rule: <implement|feedback|rebase>-self-reported-failure`, include the wizard's failure reason and the `wip_branch` value.
 - `hb=absent` AND `pr=absent` AND no completion marker in log:
   - If `now - started_at < 30s`, too early — skip.
-  - Otherwise: **run overload detection first** (see "Rate-limit (429) and overload (529) handling" above). If `is_overloaded_log` matches, follow the 529 path (wizard throttled 60s, NO provider-state change).
+  - Otherwise: **run overload detection first** (load `$SORCERER_REPO/prompts/tick-rate-limit-handling.md`). If `is_overloaded_log` matches, follow the 529 path (wizard throttled 60s, NO provider-state change).
   - Then **rate-limit detection**. If `is_rate_limited_log` matches, follow the 429 throttle path (wizard + provider throttled).
-  - Next: **run the PR-set recovery check** (see "PR-set recovery" above). Run `bash "$SORCERER_REPO/scripts/discover-pr-set.sh" "<branch_name>" "<repo1>" [<repo2> ...]`. On exit 0 (complete pr_urls map printed to stdout): the wizard completed durably even though it didn't write `pr_urls.json` — write it now from the script's stdout, set `status: awaiting-review`, set the entry's `pr_urls` to the discovered map, append a `pr-set-recovered` event with `source: "step5c"`. Do NOT mark failed, do NOT escalate. The next tick's step 12 will evaluate the set normally. On exit 1 (incomplete set): proceed to the failure path below.
-  - Only if neither 529 nor 429 was detected AND recovery found no PR set: crashed without writing output. Run **Failed-wizard WIP preservation** (above) BEFORE the status write. Then `status: failed`. Append to `.sorcerer/escalations.log` with `rule: implement-no-output` (or `feedback-no-output`, `rebase-no-output`) and the `wip_branch` value.
+  - Next: **run the PR-set recovery check** (load `$SORCERER_REPO/prompts/tick-pr-set-recovery.md`). Run `bash "$SORCERER_REPO/scripts/discover-pr-set.sh" "<branch_name>" "<repo1>" [<repo2> ...]`. On exit 0 (complete pr_urls map printed to stdout): the wizard completed durably even though it didn't write `pr_urls.json` — write it now from the script's stdout, set `status: awaiting-review`, set the entry's `pr_urls` to the discovered map, append a `pr-set-recovered` event with `source: "step5c"`. Do NOT mark failed, do NOT escalate. The next tick's step 12 will evaluate the set normally. On exit 1 (incomplete set): proceed to the failure path below.
+  - Only if neither 529 nor 429 was detected AND recovery found no PR set: crashed without writing output. Run **Failed-wizard WIP preservation** (load `$SORCERER_REPO/prompts/tick-failed-wizard-wip.md`) BEFORE the status write. Then `status: failed`. Append to `.sorcerer/escalations.log` with `rule: implement-no-output` (or `feedback-no-output`, `rebase-no-output`) and the `wip_branch` value.
 - `pr=present, hb=present` — wizard mid-write; wait for next tick.
 - `hb=present` — wizard still working; step 11c handles staleness.
 
@@ -639,7 +486,7 @@ Cases:
 - `hb=absent` AND `last_line` starts with `ARCHITECT_REVIEW_FAILED`:
   - Reviewer reported its own failure. Update reviewer `status: failed`, parent architect `status: failed`. Escalate with `rule: architect-review-self-reported-failure`.
 - `hb=absent` AND `rv=absent` AND no completion marker:
-  - Run the 429 check (see "Rate-limit (429) handling"). If 429 detected, take the throttle path on the reviewer entry (do NOT touch the parent architect's status — it stays at `architect-review-running`).
+  - Run the 429 check (load `$SORCERER_REPO/prompts/tick-rate-limit-handling.md`). If 429 detected, take the throttle path on the reviewer entry (do NOT touch the parent architect's status — it stays at `architect-review-running`).
   - Else if `now - started_at < 30s`, too early — skip.
   - Else: crashed without output. Reviewer `status: failed`, parent architect `status: failed`. Escalate with `rule: architect-review-no-output`.
 - `rv=present, hb=present` — reviewer mid-write; wait next tick.
@@ -1054,7 +901,7 @@ mtime=$(stat -c %Y <state_dir>/heartbeat 2>/dev/null)
 - If `now - mtime > 300`: heartbeat is stale. **Consult pid liveness (`is_pid_alive`) before deciding**:
   - **Pid is ALIVE** — the implement wizard is still running. Cargo builds, test suites, Sylvan FFI compilations, and long Phase-2 repo exploration can all occupy the claude subprocess for >5 min without heartbeat touches. Do NOT respawn, do NOT touch `respawn_count`, do NOT kill. Log `tick: implement <id>/<issue_key> heartbeat stale <age>s but pid alive; trusting busy wizard`. Slice-37's max-age gate bounds the wait at the configured wall-clock ceiling.
   - **Pid is DEAD** — stale AND gone, a real crash:
-    - **PR-set recovery check (run before respawn).** Run `bash "$SORCERER_REPO/scripts/discover-pr-set.sh" "<branch_name>" "<repo1>" [<repo2> ...]` (see "PR-set recovery" above). On exit 0 (complete pr_urls map printed to stdout): the wizard effectively finished its work — the stale heartbeat just means it died during cleanup. Write `pr_urls.json` from the script's stdout, set `status: awaiting-review`, set the entry's `pr_urls` to the discovered map, append `pr-set-recovered` with `source: "step11c"`. Do NOT respawn, do NOT increment `respawn_count`.
+    - **PR-set recovery check (run before respawn).** Run `bash "$SORCERER_REPO/scripts/discover-pr-set.sh" "<branch_name>" "<repo1>" [<repo2> ...]` (load `$SORCERER_REPO/prompts/tick-pr-set-recovery.md` for the full procedure). On exit 0 (complete pr_urls map printed to stdout): the wizard effectively finished its work — the stale heartbeat just means it died during cleanup. Write `pr_urls.json` from the script's stdout, set `status: awaiting-review`, set the entry's `pr_urls` to the discovered map, append `pr-set-recovered` with `source: "step11c"`. Do NOT respawn, do NOT increment `respawn_count`.
     - Only if recovery found no PR set: proceed with the respawn-or-fail path below.
     - `respawn_count == 0`: increment, re-spawn:
       ```bash
@@ -1065,7 +912,7 @@ mtime=$(stat -c %Y <state_dir>/heartbeat 2>/dev/null)
       echo $!
       ```
       Capture new pid. Append `implement-stale-respawn` event.
-    - `respawn_count >= 1`: run **Failed-wizard WIP preservation** (above) BEFORE the status write. Then `status: failed`. Append to `.sorcerer/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: implement`, `issue_key: <SOR-N>`, and the `wip_branch` value.
+    - `respawn_count >= 1`: run **Failed-wizard WIP preservation** (load `$SORCERER_REPO/prompts/tick-failed-wizard-wip.md`) BEFORE the status write. Then `status: failed`. Append to `.sorcerer/escalations.log` with `rule: stale-heartbeat-second-failure`, `mode: implement`, `issue_key: <SOR-N>`, and the `wip_branch` value.
 
 ### Step 11d — Orphan-PR adoption
 
