@@ -55,6 +55,14 @@ log() { printf '[%s] post-tick: %s\n' "$(ts)" "$1"; }
 
 [[ -f .sorcerer/sorcerer.json ]] || exit 0
 
+# Source the GitHub App token cache that pre-tick.sh writes. Without this,
+# `gh pr view` falls back to ambient gh auth (the user's PAT or whatever),
+# which often has no read access to the App-installed repos. Symptom is
+# `gh pr view ... --jq .state` returning empty for every wizard's PRs and
+# every merging wizard getting deferred indefinitely.
+# shellcheck source=/dev/null
+[[ -f .sorcerer/.token-env ]] && source .sorcerer/.token-env
+
 now_epoch=$(date +%s)
 seven_days_ago=$(( now_epoch - 7*86400 ))
 five_min_ago=$(( now_epoch - 300 ))
