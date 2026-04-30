@@ -122,49 +122,78 @@ if (( needs_refresh )); then
   fi
 fi
 
-# ---------- Step 3: drain requests ----------
-# For each .sorcerer/requests/*.md not already tracked, generate an architect
-# UUID, move the request to .sorcerer/architects/<id>/request.md, add a
-# pending-architect entry to sorcerer.json.
-drained=0
-if compgen -G ".sorcerer/requests/*.md" > /dev/null 2>&1; then
-  for req in .sorcerer/requests/*.md; do
-    [[ -f "$req" ]] || continue
-    # Skip if some architect entry already references this exact file.
-    in_use=$(jq -r --arg f "$req" \
-      '[(.active_architects // [])[] | select(.request_file == $f)] | length' \
-      .sorcerer/sorcerer.json)
-    [[ "$in_use" == "0" ]] || continue
+# Drain any .sorcerer/requests/*.md into pending-architect entries. Used
+# both by step 3 below and by step 3.7 after auto-drain may have filed
+# a new request.
+drain_requests() {
+  local n=0
+  if compgen -G ".sorcerer/requests/*.md" > /dev/null 2>&1; then
+    for req in .sorcerer/requests/*.md; do
+      [[ -f "$req" ]] || continue
+      # Skip if some architect entry already references this exact file.
+      local in_use
+      in_use=$(jq -r --arg f "$req" \
+        '[(.active_architects // [])[] | select(.request_file == $f)] | length' \
+        .sorcerer/sorcerer.json)
+      [[ "$in_use" == "0" ]] || continue
 
-    aid=$(uuidgen)
-    mkdir -p ".sorcerer/architects/${aid}/logs"
-    mv "$req" ".sorcerer/architects/${aid}/request.md"
-    started=$(ts)
-    tmp=$(mktemp)
-    jq --arg id "$aid" --arg started "$started" \
-       --arg req ".sorcerer/architects/${aid}/request.md" \
-       '.active_architects += [{
-          id: $id, status: "pending-architect", started_at: $started,
-          request_file: $req, plan_file: null,
-          pid: null, respawn_count: 0
-        }]' .sorcerer/sorcerer.json > "$tmp" && mv "$tmp" .sorcerer/sorcerer.json
-    log "drained request → architect $aid"
-    drained=$((drained + 1))
-  done
-fi
-(( drained > 0 )) && log "drained $drained request(s)"
+      local aid started tmp
+      aid=$(uuidgen)
+      mkdir -p ".sorcerer/architects/${aid}/logs"
+      mv "$req" ".sorcerer/architects/${aid}/request.md"
+      started=$(ts)
+      tmp=$(mktemp)
+      jq --arg id "$aid" --arg started "$started" \
+         --arg req ".sorcerer/architects/${aid}/request.md" \
+         '.active_architects += [{
+            id: $id, status: "pending-architect", started_at: $started,
+            request_file: $req, plan_file: null,
+            pid: null, respawn_count: 0
+          }]' .sorcerer/sorcerer.json > "$tmp" && mv "$tmp" .sorcerer/sorcerer.json
+      log "drained request → architect $aid"
+      n=$((n + 1))
+    done
+  fi
+  (( n > 0 )) && log "drained $n request(s)"
+  return 0
+}
+
+# ---------- Step 3: drain requests ----------
+drain_requests
 
 # ---------- Step 3.5: classify tick mode ----------
 # Determine whether the upcoming LLM tick can be skipped (idle) or must run
 # (mechanical / creative / recovery). Writes .sorcerer/.tick-mode.
 # coordinator-loop.sh reads this file and skips the claude -p invocation
 # entirely when mode=idle — bounded by SORCERER_MAX_IDLE_SKIPS so periodic
-# LLM-side sweeps still fire eventually. Runs BEFORE render so the digest
-# can surface the current mode.
+# LLM-side sweeps still fire eventually. Runs BEFORE auto-drain so we
+# only auto-drain when the tick would otherwise be idle.
 bash "$SORCERER_REPO/scripts/classify-tick-mode.sh" "$PROJECT_ROOT" || \
   log "classify-tick-mode failed (rc=$?); tick will run as mechanical"
 
-# ---------- Step 3.6: render LLM-tick state digest ----------
+# ---------- Step 3.7: auto-drain Linear backlog when idle ----------
+# When the upcoming tick would be idle but Linear still has unclaimed
+# non-terminal SOR issues, file a sorcerer drain request so the next
+# tick spawns an architect to decompose the remaining backlog. Without
+# this, the coordinator can sit idle indefinitely waiting for a manual
+# /sorcerer prompt while backlog work piles up.
+#
+# Rate-limited via .sorcerer/.last-auto-drain (default 30min cooldown).
+# When a request is filed, we re-run drain_requests() so it gets
+# absorbed into a pending-architect entry on THIS tick — and then
+# re-classify so .tick-mode reflects the new architect.
+if [[ -x "$SORCERER_REPO/scripts/auto-drain-backlog.sh" ]]; then
+  auto_drain_out=$(bash "$SORCERER_REPO/scripts/auto-drain-backlog.sh" "$PROJECT_ROOT" 2>&1 || true)
+  [[ -n "$auto_drain_out" ]] && log "auto-drain: $auto_drain_out"
+  if compgen -G ".sorcerer/requests/*.md" > /dev/null 2>&1; then
+    log "auto-drain produced a new request; re-draining and re-classifying"
+    drain_requests
+    bash "$SORCERER_REPO/scripts/classify-tick-mode.sh" "$PROJECT_ROOT" || \
+      log "classify-tick-mode (post-auto-drain) failed (rc=$?); tick will run as mechanical"
+  fi
+fi
+
+# ---------- Step 3.8: render LLM-tick state digest ----------
 # Generate .sorcerer/.tick-context.md — a compact state digest the LLM tick
 # reads in place of dumping the full sorcerer.json. Keeps the LLM's working
 # context small on long-lived projects with extensive merged-wizard history.
