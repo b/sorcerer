@@ -407,7 +407,14 @@ export GH_APP_TOKEN_EXPIRES_AT='2026-04-21T00:00:00Z'
 - **Step 2** (token refresh) — regenerates `.sorcerer/.token-env` if it's missing or expires within 600s; appends a `token-refreshed` event.
 - **Step 3** (drain requests) — moves each `.sorcerer/requests/*.md` to a freshly-minted `.sorcerer/architects/<id>/request.md`, appends a `pending-architect` entry to `active_architects`.
 
-When you read `.sorcerer/sorcerer.json` you ALREADY see the post-pre-tick state. Do not redo any of these — pre-tick already mutated `sorcerer.json` and `events.log`. Begin at step 4.
+Pre-tick also:
+
+- Renders **`.sorcerer/.tick-context.md`** — a compact digest of non-terminal architects, non-terminal wizards, provider state, recent events, recent escalations, and the tick-mode classification. **Read this digest first** as your canonical state input. It strips terminal-state history (merged wizards, archived/completed architects from past coordinator sessions) that doesn't inform any current decision and is the dominant source of token cost when reading raw `sorcerer.json` on long-lived projects.
+- Writes **`.sorcerer/.tick-mode`** — one of `idle | mechanical | creative | recovery`. If you see `mechanical`, all tick work is dispatch / completion-detect / heartbeat-poll. If you see `creative`, an `awaiting-review` wizard exists and step 12 will fire. If you see `recovery`, a failed/blocked entry or a new escalation needs routing. (`idle` ticks are skipped before the LLM is invoked, so you'll never see this value.)
+
+You may still `Read .sorcerer/sorcerer.json` directly when you need a field the digest doesn't carry — full PR-set state for step 12, worktree paths, throttle counts, the merged-wizard graveyard for cross-checks. The raw JSON remains authoritative; the digest is the cheap reading path for the common case.
+
+Do not redo steps 1–3 — pre-tick already mutated `sorcerer.json` and `events.log`. Begin at step 4.
 
 ### Step 4 — Spawn architects
 

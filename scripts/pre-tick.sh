@@ -154,4 +154,21 @@ if compgen -G ".sorcerer/requests/*.md" > /dev/null 2>&1; then
 fi
 (( drained > 0 )) && log "drained $drained request(s)"
 
+# ---------- Step 3.5: classify tick mode ----------
+# Determine whether the upcoming LLM tick can be skipped (idle) or must run
+# (mechanical / creative / recovery). Writes .sorcerer/.tick-mode.
+# coordinator-loop.sh reads this file and skips the claude -p invocation
+# entirely when mode=idle — bounded by SORCERER_MAX_IDLE_SKIPS so periodic
+# LLM-side sweeps still fire eventually. Runs BEFORE render so the digest
+# can surface the current mode.
+bash "$SORCERER_REPO/scripts/classify-tick-mode.sh" "$PROJECT_ROOT" || \
+  log "classify-tick-mode failed (rc=$?); tick will run as mechanical"
+
+# ---------- Step 3.6: render LLM-tick state digest ----------
+# Generate .sorcerer/.tick-context.md — a compact state digest the LLM tick
+# reads in place of dumping the full sorcerer.json. Keeps the LLM's working
+# context small on long-lived projects with extensive merged-wizard history.
+bash "$SORCERER_REPO/scripts/render-tick-context.sh" "$PROJECT_ROOT" || \
+  log "render-tick-context failed (rc=$?); LLM tick will fall back to raw sorcerer.json"
+
 exit 0
