@@ -33,24 +33,128 @@ Read in order:
 - [`docs/lifecycle.md`](docs/lifecycle.md) — coordinator tick, wizard phases, PR-set review
 - [`docs/setup.md`](docs/setup.md) — external access, two-tier repo allowlist, doctor, multi-subscription provider cycling
 
-## Quick start
+## Setup
 
-1. Install CLI prereqs: `git`, `claude` (2.1.1+), `gh` (2.40+), `jq`, `curl`, `openssl`, `uuidgen`, `shellcheck`. No Python needed.
-2. Complete [`docs/setup.md`](docs/setup.md) — GitHub App, Linear MCP, branch protection. Bare clones are auto-created on first use.
-3. Install sorcerer (one-time):
+Sorcerer needs three external services wired up before its first run: a **GitHub App** (so wizards can push branches and open PRs), **Linear MCP** (so the architect can read issues and the post-tick can flip status to Done), and the **Anthropic auth** the `claude` CLI uses. Each is one-time per workstation.
+
+### 1. CLI prereqs
+
+```
+git (2.40+)  claude (2.1.1+)  gh (2.40+)  jq  curl  openssl  uuidgen  shellcheck
+```
+
+No Python or Node runtime needed. `shellcheck` is for the lint-only path; the others are runtime-critical.
+
+### 2. GitHub App
+
+Why an App and not a PAT: per-installation tokens are scoped to specific repos, expire in 1 hour, and don't tie sorcerer's blast radius to your personal account. Wizards push under `app/<bot-slug>` instead of as you.
+
+**Create the App:**
+
+1. In the org or account that owns your target repos, go to **Settings → Developer settings → GitHub Apps → New GitHub App**.
+2. Required **repository** permissions:
+    - **Metadata**: Read
+    - **Contents**: Read and write *(branches, commits)*
+    - **Pull requests**: Read and write
+    - **Issues**: Read
+    - **Actions**: Read *(CI workflow runs / job logs)*
+    - **Checks**: Read
+    - **Commit statuses**: Read
+    - **Workflows**: No access *(this permission only controls editing `.github/workflows/*.yml`; sorcerer must never do that. Reading workflow files is already covered by Contents: Read.)*
+3. **Webhooks**: disabled. Sorcerer polls.
+4. **Install** the App on every repo that will appear in either `repos` (mergeable) or `explorable_repos` (read-only during design). See "Two-tier repo allowlist" below.
+5. Generate a **private key** under **Settings → General → Private keys → Generate a private key**; download the `.pem`.
+6. Save it at `mode 600`:
    ```
-   bash scripts/install-skill.sh
+   mkdir -p $HOME/.keys
+   mv ~/Downloads/<app>.YYYY-MM-DD.private-key.pem $HOME/.keys/<app>.private-key.pem
+   chmod 600 $HOME/.keys/<app>.private-key.pem
    ```
-   This symlinks the `/sorcerer` skill into `~/.claude/skills/`, pre-approves its Bash invocation in `~/.claude/settings.json`, writes `SORCERER_REPO` into `~/.shell_env`, and **auto-installs the `/wizard` skill** from [vlad-ko/claude-wizard](https://github.com/vlad-ko/claude-wizard) (MIT) if it's not already present. Sorcerer's implement/feedback wizards invoke `/wizard`'s TDD methodology.
-4. Verify:
+7. Export in your shell profile (`~/.bashrc`, `~/.zshrc`, or `~/.shell_env`):
+   ```sh
+   export GH_APP_CLIENT_ID=<client-id>
+   export GH_APP_APP_ID=<numeric-app-id>
+   export GH_APP_PRIVATE_KEY_PATH=$HOME/.keys/<app>.private-key.pem
    ```
-   bash scripts/doctor.sh
+8. Verify the token-mint flow works. From the repo where you cloned sorcerer:
    ```
-5. In any Claude Code session, from the project you want sorcerer to work on:
+   bash scripts/refresh-token.sh --installation-owner <org-or-user>
    ```
-   /sorcerer <your large-system description>
-   ```
-   A `.sorcerer/` directory is auto-bootstrapped in that project on first run.
+   It should emit `export GITHUB_TOKEN='ghs_...'` lines. If it errors with `could not auto-pick installation`, your App is installed in multiple places and you need to pass `--installation-owner <login>` (or set `GH_APP_INSTALLATION_OWNER` in your shell env). Both paths are normal for accounts with App installs in more than one org.
+
+**Per-repo branch protection** (do this for each repo in `repos` before the first sorcerer run):
+
+1. `https://github.com/<owner>/<repo>/settings/branches` → add a rule for the default branch.
+2. Enable **Require a pull request before merging**.
+3. Enable **Require status checks to pass before merging**; select your required CI checks.
+4. Enable **Require branches to be up to date before merging**.
+5. Enable **Do not allow bypassing the above settings**.
+6. **Settings → General → Pull Requests**: enable **Allow auto-merge** and **Automatically delete head branches**.
+
+Repos in `explorable_repos` but not in `repos` need only the App installed — sorcerer reads them but never writes.
+
+### 3. Linear
+
+Sorcerer treats **Linear as the system of record for issue state**. Architects read Linear to size new work; designers create epics + issues there; implements transition status to In Progress; post-tick.sh transitions to Done after merge. Without Linear MCP, the pipeline can't operate — there's no fallback to flat-file state.
+
+**Connect Linear MCP** in Claude Code:
+
+1. In any Claude Code interactive session, run `/mcp`.
+2. Pick the Linear server, complete the OAuth flow in your browser. The token lands in `~/.claude/.credentials.json`.
+3. Verify: `claude mcp list` should show `plugin:linear:linear: https://mcp.linear.app/mcp (HTTP) - ✓ Connected`.
+
+**Find your Linear team key.** Open any issue in the team you want sorcerer to work in. The URL is `https://linear.app/<workspace>/issue/<TEAM>-<NUM>/...` — `<TEAM>` is the key. You'll put this in `config.json` as `linear.default_team_key`. Sorcerer resolves the key to the Linear team UUID on first run.
+
+**Connect the Linear-GitHub integration** (recommended). In Linear: **Settings → Integrations → GitHub → Connect**, select every repo in `repos`. Linear auto-links PRs that reference issue IDs. Sorcerer uses `Part of <TEAM-NUM>` (not `Closes`) in PR bodies so Linear links but doesn't auto-close — sorcerer's post-tick is the authoritative source of the Done transition.
+
+### 4. Anthropic auth
+
+The `claude` CLI uses your existing auth (`~/.claude` from `claude /login`, or `$ANTHROPIC_API_KEY`). Verify:
+
+```
+claude --version && echo 'reply: ok' | claude -p
+```
+
+If you have multiple Anthropic auth slots (Max + API key, or two Max accounts), see [docs/setup.md § Provider cycling](docs/setup.md#provider-cycling-multiple-anthropic-subscriptions--api-keys) — sorcerer rotates across them on rate-limit (HTTP 429).
+
+### 5. Install sorcerer
+
+Once-off:
+
+```
+bash scripts/install-skill.sh
+```
+
+This symlinks the `/sorcerer` skill into `~/.claude/skills/`, pre-approves its Bash invocation in `~/.claude/settings.json`, writes `SORCERER_REPO` into `~/.shell_env`, and **auto-installs the `/wizard` skill** from [vlad-ko/claude-wizard](https://github.com/vlad-ko/claude-wizard) (MIT) if it's not already present. Sorcerer's implement / feedback wizards invoke `/wizard`'s TDD methodology.
+
+### 6. Verify everything
+
+```
+bash scripts/doctor.sh <project-root>
+```
+
+The doctor checks every prereq above and reports specific, actionable failure messages. `<project-root>` is the directory you'll run `/sorcerer` from (the one whose `.sorcerer/` directory will hold per-project state). Re-run any time you change config.
+
+### 7. Two-tier repo allowlist
+
+Sorcerer's `<project>/.sorcerer/config.json` has two repo lists:
+
+- `repos` — repos sorcerer may **open PRs in and merge to**. Every issue's `repos: [...]` must be a subset of this.
+- `explorable_repos` — superset of `repos`; repos sorcerer may **read** during design (architect exploration, designer fan-out). The App must be installed on every one.
+
+If a designer wants to touch a repo that's only in `explorable_repos` (not in `repos`), the design wizard escalates — you decide whether to promote.
+
+The minimal `config.json` that covers everything above is in [`config.json.example`](config.json.example) and explained line-by-line in [`docs/setup.md`](docs/setup.md#minimal-configjson). On first `/sorcerer` call from a project, sorcerer auto-bootstraps `<project>/.sorcerer/config.json` with the repo derived from `git remote get-url origin` and `team_key=SOR`. Edit from the template for multi-repo or non-default Linear teams.
+
+### 8. Run
+
+In any Claude Code session, from the project root:
+
+```
+/sorcerer <your large-system description>
+```
+
+A `.sorcerer/` directory is auto-bootstrapped on first run. The coordinator runs detached; close the session whenever you want.
 
 ## Slash commands
 
