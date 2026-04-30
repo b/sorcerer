@@ -264,12 +264,29 @@ while true; do
   fi
 
   # Pre-tick: deterministic bookkeeping (state reconciliation, token refresh,
-  # request drain). Runs in bash so the LLM tick doesn't pay tokens for it.
-  # Output goes to stdout, which the parent shell redirects to coordinator.log.
+  # request drain, state-digest render, tick-mode classification). Runs in
+  # bash so the LLM tick doesn't pay tokens for any of it. Output goes to
+  # stdout, which the parent shell redirects to coordinator.log.
   bash "$SORCERER_REPO/scripts/pre-tick.sh" "$PROJECT_ROOT" || \
     echo "[$(ts)] pre-tick failed (rc=$?); continuing to tick anyway"
 
-  echo "[$(ts)] running tick"
+  # If pre-tick classified the tick as idle (no in-flight work, no pending
+  # requests, no new escalations, and the consecutive-skip bound hasn't
+  # been reached), skip the claude -p tick entirely. This is the dominant
+  # cost-saver for projects that spend most of their time waiting on
+  # single-slot wizard chains: ~50% of ticks were no-ops reading 81 KB to
+  # report "0 of everything". classify-tick-mode.sh forces mechanical after
+  # SORCERER_MAX_IDLE_SKIPS (default 5) consecutive idles so step-7 /
+  # step-11d / Linear-orphan-sweeper still fire periodically.
+  tick_mode=$(cat .sorcerer/.tick-mode 2>/dev/null || echo "mechanical")
+  if [[ "$tick_mode" == "idle" ]]; then
+    echo "[$(ts)] tick: idle — no in-flight work, skipping LLM"
+    printf '{"ts":"%s","event":"tick-skipped-idle"}\n' "$(ts)" >> .sorcerer/events.log
+    sleep 1
+    continue
+  fi
+
+  echo "[$(ts)] running tick (mode=$tick_mode)"
   TICK_ARGS=(--output-format text --permission-mode bypassPermissions)
   TICK_LOG=".sorcerer/last-tick.log"
 
