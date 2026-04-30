@@ -319,10 +319,22 @@ fi  # end LIVE_ONLY guard for static checks
 # `claude mcp list` (the static check above) reports the plugin's connection
 # state in the interactive context. It does NOT verify that `claude -p`
 # subprocesses (the form the coord uses) can actually see the plugin's tools.
-# These can diverge — see the 2026-04-26 incident where
-# ~/.claude/plugins/known_marketplaces.json was zeroed: interactive sessions
-# stayed working from in-memory cache, but every `claude -p` invocation lost
-# the Linear MCP tools and the coord stalled for hours.
+# These can diverge for two reasons:
+#
+#   1. The OAuth access token in ~/.claude/.credentials.json is missing or
+#      empty (only discovery metadata is stored). claude -p has nothing to
+#      present, the connect attempt fails with "needs auth", and the failure
+#      is cached.
+#
+#   2. The auth IS valid, but ~/.claude/mcp-needs-auth-cache.json has a
+#      stale "needs-auth" entry from a prior failed probe. Subsequent
+#      claude -p invocations honor the cache without re-trying the
+#      connection — even after the operator re-auths via /mcp. The cache
+#      is sticky until cleared.
+#
+# Either way, both `claude -p` and `claude mcp list` will correctly report
+# "Needs authentication" — diagnosing which root cause is in play matters
+# for remediation. We probe for both below.
 section "Linear MCP available to claude -p (subprocess context)"
 if command -v claude >/dev/null 2>&1; then
   if mcp_out=$(timeout 30 claude -p --output-format text \
@@ -330,7 +342,29 @@ if command -v claude >/dev/null 2>&1; then
     if grep -q "mcp__plugin_linear_linear__get_issue" <<<"$mcp_out"; then
       ok "Linear MCP visible to claude -p (mcp__plugin_linear_linear__get_issue resolves)"
     else
-      no "Linear MCP NOT visible to claude -p — coord ticks will silently skip Linear-dependent steps. Likely cause: ~/.claude/plugins/known_marketplaces.json corrupt/zeroed. Remediation: delete the file and run /plugin in an interactive Claude Code session to let it rebuild."
+      # Differentiate cause-1 (no token) vs cause-2 (stale cache).
+      has_token="false"
+      if [[ -f ~/.claude/.credentials.json ]]; then
+        has_token=$(jq -r '
+          (.mcpOAuth // {}) | to_entries
+          | map(select(.key | startswith("plugin:linear:linear")))
+          | .[0].value.accessToken // ""
+          | length > 0
+        ' ~/.claude/.credentials.json 2>/dev/null || echo "false")
+      fi
+      cache_says_needs_auth="false"
+      if [[ -f ~/.claude/mcp-needs-auth-cache.json ]]; then
+        cache_says_needs_auth=$(jq -r '
+          ((."plugin:linear:linear" // null) != null) | tostring
+        ' ~/.claude/mcp-needs-auth-cache.json 2>/dev/null || echo "false")
+      fi
+      if [[ "$has_token" == "true" && "$cache_says_needs_auth" == "true" ]]; then
+        no "Linear MCP NOT visible to claude -p — STALE CACHE. ~/.claude/.credentials.json has a valid Linear accessToken but ~/.claude/mcp-needs-auth-cache.json has a sticky 'needs-auth' entry from a prior failed probe. Remediation: \`echo '{}' > ~/.claude/mcp-needs-auth-cache.json\` then re-run this doctor or any \`claude -p\` invocation. The connect attempt will succeed and the cache will stay empty."
+      elif [[ "$has_token" == "true" ]]; then
+        no "Linear MCP NOT visible to claude -p — token present but probe failed. credentials.json has a Linear accessToken, the cache is clean, yet \`claude -p\` exposes only the authenticate/complete_authentication tools. Likely cause: token expired, revoked, or being rejected by mcp.linear.app. Remediation: in an interactive Claude Code session, run /mcp, pick Linear, and complete the OAuth flow to refresh the token."
+      else
+        no "Linear MCP NOT visible to claude -p — NO ACCESS TOKEN. ~/.claude/.credentials.json has no Linear accessToken (only OAuth discovery metadata, or the entry is missing entirely). The OAuth flow has not completed in this user's session. Remediation: in an interactive Claude Code session, run /mcp, pick the Linear server, and complete the browser OAuth flow. After that completes, the token lands in ~/.claude/.credentials.json and every \`claude -p\` invocation will see the full Linear MCP toolset."
+      fi
     fi
   else
     warn "claude -p subprocess timed out or errored during MCP probe; check coord-side claude auth"
