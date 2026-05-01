@@ -131,6 +131,16 @@ fi
 bash "$SORCERER_REPO/scripts/ensure-linear-label.sh" "$PROJECT_ROOT" 2>&1 \
   | while IFS= read -r line; do log "$line"; done || true
 
+# ---------- Step 2.6: ensure umbrella Linear project exists ----------
+# Idempotent via .sorcerer/.linear-project-ok marker. The umbrella project
+# is the Linear-side container for all of this sorcerer-project's issues —
+# its UUID gets written to config.json:linear.project_uuid so the designer
+# can pass it as projectId on every save_issue. One project per
+# sorcerer-project (e.g. `archers`), NOT one per sub-epic — the per-sub-epic
+# explosion was retired alongside save_project.
+bash "$SORCERER_REPO/scripts/ensure-linear-project.sh" "$PROJECT_ROOT" 2>&1 \
+  | while IFS= read -r line; do log "$line"; done || true
+
 # Drain any .sorcerer/requests/*.md into pending-architect entries. Used
 # both by step 3 below and by step 3.7 after auto-drain may have filed
 # a new request.
