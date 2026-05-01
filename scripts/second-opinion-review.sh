@@ -54,6 +54,14 @@ done
 
 cd "$PROJECT_ROOT" || { echo "ERROR: cannot cd to $PROJECT_ROOT" >&2; exit 1; }
 
+# Source .sorcerer/.token-env so the inner claude -p subprocess inherits a
+# valid GITHUB_TOKEN (and GH_TOKEN) — required for the reviewer's `gh` calls
+# to fetch the PR diff and PR-state metadata. Without this, gh sees no auth,
+# the reviewer can't read the PRs, returns "all not verified", and the merge
+# gate diverges between first-opinion (merge) and second-opinion (escalate)
+# on every awaiting-review wizard. Same shape as PR #82 (post-tick.sh).
+[[ -f .sorcerer/.token-env ]] && source .sorcerer/.token-env
+
 PROMPT_FILE="$SORCERER_REPO/prompts/second-opinion-review.md"
 [[ -f "$PROMPT_FILE" ]] || { echo "ERROR: missing $PROMPT_FILE" >&2; exit 1; }
 
