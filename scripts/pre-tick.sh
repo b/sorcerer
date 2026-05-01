@@ -122,16 +122,7 @@ if (( needs_refresh )); then
   fi
 fi
 
-# ---------- Step 2.5: ensure project label exists in Linear ----------
-# Idempotent via .sorcerer/.linear-label-ok marker — burns one Haiku-backed
-# Linear MCP call on first run for a project, then short-circuits. The
-# label is required for designer issue creation (each new SOR issue gets
-# the project label) and for multi-project disambiguation in
-# has-linear-work / step-7 sweeper / design-review consistency.
-bash "$SORCERER_REPO/scripts/ensure-linear-label.sh" "$PROJECT_ROOT" 2>&1 \
-  | while IFS= read -r line; do log "$line"; done || true
-
-# ---------- Step 2.6: ensure umbrella Linear project exists ----------
+# ---------- Step 2.5: ensure umbrella Linear project exists ----------
 # Idempotent via .sorcerer/.linear-project-ok marker. The umbrella project
 # is the Linear-side container for all of this sorcerer-project's issues —
 # its UUID gets written to config.json:linear.project_uuid so the designer

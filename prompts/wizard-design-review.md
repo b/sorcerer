@@ -31,7 +31,7 @@ For each defect, decide: can I fix this with a focused edit while staying faithf
 
 Walk these checks in order. For each defect found, either edit it (manifest file via Edit/Write, Linear issue via `save_issue`) or note it for the reject path:
 
-1. **Sub-epic fidelity.** Read the sub-epic's `mandate` from the architect plan, then `manifest.json`. (Older manifests may carry an `epic_linear_id` referring to a per-sub-epic Linear project; that's legacy — designers no longer create those, so don't fetch via `get_project`. The manifest + the architect plan together carry all the scope information you need.) If the manifest is **missing** scope from the mandate, **add issues** for it (`save_issue` to create them, then update `manifest.issues`). If the manifest **adds** scope outside the mandate, **remove or scope-down** those issues (`save_issue` with `state="Cancelled"` for the unwanted ones, then drop them from `manifest.issues`).
+1. **Sub-epic fidelity.** Read the sub-epic's `mandate` from the architect plan, then `manifest.json`. The manifest and the architect plan together carry all the scope information; do not call `get_project`. If the manifest is **missing** scope from the mandate, **add issues** for it (`save_issue` to create them, then update `manifest.issues`). If the manifest **adds** scope outside the mandate, **remove or scope-down** those issues (`save_issue` with `state="Cancelled"` for the unwanted ones, then drop them from `manifest.issues`).
 
 2. **Issue concreteness.** For each `issue.linear_id` in the manifest, fetch the issue via `mcp__plugin_linear_linear__get_issue` and check the description has:
    - A **Goal** that's specific (not "improve X").
@@ -53,7 +53,7 @@ Walk these checks in order. For each defect found, either edit it (manifest file
 
 6. **Merge ordering.** If `merge_order` is declared on an issue, it MUST be a subset of that issue's `repos`, and the order MUST be derivable from genuine dependencies (e.g. protos before consumers). Strip out-of-list entries. Re-order or remove entirely if the ordering is arbitrary.
 
-7. **Manifest → Linear existence check.** For every issue in `manifest.issues`, call `mcp__plugin_linear_linear__get_issue` with `id = <linear_id>` and confirm the issue exists, is in this project's team, and carries the project label (`config.json:linear.project_label`, e.g. `archers`). A missing-from-Linear or wrong-team / wrong-label issue is a designer bug — fix by re-issuing the `save_issue` with the correct fields, or remove the entry from `manifest.issues` if it's bogus. (The reverse direction — "issues in Linear that aren't in this manifest" — used to be checkable via per-sub-epic Linear project filtering; that mechanism was retired alongside `save_project`. The team-wide label filter would surface ALL sub-epics' issues as candidates, which has too high a false-positive rate to be useful here. Operators handle Linear-side orphans manually.)
+7. **Manifest → Linear existence check.** For every issue in `manifest.issues`, call `mcp__plugin_linear_linear__get_issue` with `id = <linear_id>` and confirm the issue exists, is in this project's team, and carries the umbrella project UUID (`config.json:linear.project_uuid`). A missing-from-Linear or wrong-team / wrong-project issue is a designer bug — fix by re-issuing the `save_issue` with the correct fields, or remove the entry from `manifest.issues` if it's bogus. (The reverse direction — "issues in the umbrella project that aren't in this manifest" — would surface ALL sub-epics' issues; operators handle Linear-side orphans manually.)
 
 8. **Referenced-but-excluded SOR-NNN MUST be tracked.** Grep `manifest.json` AND every issue body in the manifest (case-sensitive) for `SOR-\d+` mentions. For each cited SOR-NNN that is NOT itself a member of `manifest.issues`, classify:
    - **Owned by another active manifest** — the SOR appears in some other designer's `manifest.issues` (cross-sub-epic dependency, already tracked elsewhere). PASS.
@@ -140,6 +140,6 @@ If anything blocks completion (Linear MCP unavailable, manifest malformed beyond
 
 - Edit, don't comment. If you'd write "this issue should be split" — split it.
 - Document every edit in `edits_made` precisely. Include both sides (Linear and manifest) of any change so the audit trail is complete.
-- When splitting an issue, give the new issue(s) the same `labels` array as the original (just the project label, e.g. `["archers"]`). Do NOT re-attach a `wizard:<...>` label — those have been retired alongside `save_project`.
+- When splitting an issue, give the new issue(s) the same `project` value (the umbrella project UUID) as the original. Do NOT attach any `labels`.
 - Keep the summary one paragraph.
 - No code review. You're reviewing the issue set, not implementations.
