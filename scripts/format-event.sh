@@ -25,7 +25,7 @@ jq -r '
     elif $e == "designer-spawned" then
       "Designer spawned for sub-epic '\''\(.sub_epic)'\'' (id: \(short(.id)))"
     elif $e == "designer-completed" then
-      "Designer completed: Linear epic \(short(.epic_linear_id)), \(.issues) issue(s)"
+      "Designer completed: \(.issues) issue(s)\(if .epic_linear_id then " (legacy epic \(short(.epic_linear_id)))" else "" end)"
     elif $e == "architect-review-spawned" then
       "Architect-review spawned for \(short(.subject_id)) (reviewer: \(short(.id)))"
     elif $e == "architect-review-completed" then

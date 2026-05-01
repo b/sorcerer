@@ -22,30 +22,22 @@ Read your context file at `$SORCERER_CONTEXT_FILE` (JSON). Required fields for d
 - `bare_clones_dir` — directory containing bare clones
 - `state_dir` — where to write `manifest.json`
 - `heartbeat_file` — touch periodically
-- `wizard_id` — your UUID, used as the `wizard:<wizard_id>` Linear label
+- `wizard_id` — your UUID (used in the manifest only — NOT applied as a Linear label; per-wizard labels accumulate as Linear pollution and the on-disk manifest is the canonical wizard→issue mapping)
 
 Also read these from disk:
 - The project's `config.json` (at `<project-root>/.sorcerer/config.json`, typically two levels up from `state_dir`) — for `linear.default_team_key` AND `linear.project_label` (e.g. `archers`). The project label disambiguates this project's issues from other sorcerer projects sharing the same Linear team. If `project_label` is unset, use `basename(<project-root>)`.
 
 ## Outputs
 
-### 1. Linear project (the epic)
-
-Via `mcp__plugin_linear_linear__save_project`:
-- `name`: derived from your sub-epic mandate (concise, ideally matches `sub_epic_name` from the architect plan)
-- `description`: a short paragraph stating the sub-epic's goal, plus a link/reference to the original request file path
-- `teamId`: resolve via `mcp__plugin_linear_linear__get_team` using the team key from `config.json:linear.default_team_key`
-
-Capture the returned project `id`.
-
-### 2. Linear issues (one per atomic merge unit)
+### 1. Linear issues (one per atomic merge unit)
 
 Via `mcp__plugin_linear_linear__save_issue`, one call per issue:
-- `projectId`: from step 1
 - `team`: the team UUID
 - `title`: clear, action-oriented
 - `description`: per the template below
-- `labels`: include BOTH `wizard:<wizard_id>` AND the project label from `config.json:linear.project_label` (e.g. `["wizard:abc123", "archers"]`). The project label is mandatory — every issue created by a sorcerer designer MUST carry it, since downstream filters (`has-linear-work.sh`, step-7 sweeper, design-review consistency, future cross-project queries) key off it to disambiguate this project's issues from other sorcerer projects on the same Linear team. The label is created in advance by `scripts/ensure-linear-label.sh` (called from pre-tick), so it always exists by the time you write here.
+- `labels`: `["<project_label>"]` — exactly one label, the project label from `config.json:linear.project_label` (e.g. `["archers"]`). The label is required: downstream filters (`has-linear-work.sh`, step-7 sweeper, design-review consistency, future cross-project queries) key off it to disambiguate this project's issues from other sorcerer projects on the same Linear team. It's created in advance by `scripts/ensure-linear-label.sh` (called from pre-tick), so it always exists by the time you write here.
+- **Do NOT pass `projectId`.** Sorcerer no longer creates a Linear project per sub-epic — the architect's `plan.json` and the designer's `manifest.json` on disk are the canonical sub-epic containers. Per-sub-epic Linear projects accumulated as ~25+ orphans in the SOR team before being removed; the issue's `description` carries the sub-epic name (see the `## Notes` template below) for human-readable context.
+- **Do NOT pass `wizard:<wizard_id>` in labels.** Per-wizard labels accumulated as ~22+ orphans before being removed.
 
 **The `save_issue` response's `id` field holds the Linear identifier** (e.g. `"SOR-42"`). There is no separate UUID field for issues — the identifier IS the canonical id from the Linear MCP plugin's perspective. Same goes for `get_issue` and `list_issues`. The `identifier` field, if present, is the same value.
 
@@ -55,6 +47,9 @@ For the manifest, capture this `id` value into both `linear_id` and `issue_key` 
 ```markdown
 ## Goal
 <one-paragraph goal>
+
+## Sub-epic
+<sub_epic_name from the architect plan> (architect <arch_id_short>)
 
 ## Acceptance criteria
 - [ ] <criterion 1>
@@ -73,13 +68,14 @@ For the manifest, capture this `id` value into both `linear_id` and `issue_key` 
 <implementation hints, relevant files, gotchas>
 ```
 
+The `## Sub-epic` line carries the human-readable scoping that previously came from the per-sub-epic Linear project. It's how an operator browsing Linear identifies which architect plan and sub-epic an issue belongs to.
+
 Capture each issue's `id` (the Linear UUID, e.g. `4be79900-48fa-40ad-9b3c-7ecc903a4e09`) **and** its `identifier` (the human-readable key, e.g. `SOR-42`). These are different values — the UUID is what `linear_id` in the manifest holds; the identifier is what `issue_key` holds. Do not put the identifier in both fields.
 
-### 3. `<state_dir>/manifest.json` (atomic write)
+### 2. `<state_dir>/manifest.json` (atomic write)
 
 ```json
 {
-  "epic_linear_id": "<whatever save_project returned in its id field>",
   "sub_epic_name": "<name from the architect's sub-epic>",
   "issues": [
     {
@@ -92,6 +88,8 @@ Capture each issue's `id` (the Linear UUID, e.g. `4be79900-48fa-40ad-9b3c-7ecc90
   ]
 }
 ```
+
+The `epic_linear_id` field that older manifests carry has been retired alongside `save_project`. New manifests omit it. Downstream readers tolerate either shape — older manifests still work, new ones don't carry the field.
 
 Field notes:
 - `merge_order` and `depends_on` are optional; omit them (or use `[]`) when not applicable.
@@ -112,26 +110,24 @@ Write to `<state_dir>/manifest.json.tmp`, then `bash -c 'jq . "<state_dir>/manif
    - Touch the heartbeat after each repo.
 6. **Reason about the mandate.** Decompose into atomically-mergeable issues with explicit acceptance criteria. Identify which repos each issue touches, any merge ordering, any inter-issue dependencies.
 7. **Touch heartbeat.**
-8. **Create the Linear project** via `mcp__plugin_linear_linear__save_project`. Capture the `id`.
+8. **Create each Linear issue** via `mcp__plugin_linear_linear__save_issue`. After each call, capture the response's `id` field — that's the Linear identifier (e.g. `SOR-42`). Track in your in-memory issue list. The only label to attach is the project label from `config.json:linear.project_label` — pass `labels: ["<project_label>"]`. Do NOT pass `projectId`. Do NOT pass any `wizard:<...>` label. **Do NOT pass `blockedBy` / `blocks` on the create call** — at create time, dependent issues haven't been created yet. Native relations are populated in the next step once every issue exists.
 9. **Touch heartbeat.**
-10. **Create each Linear issue** via `mcp__plugin_linear_linear__save_issue`. After each call, capture the response's `id` field — that's the Linear identifier (e.g. `SOR-42`). Track in your in-memory issue list. Include BOTH `wizard:<wizard_id>` AND the project label (from `config.json:linear.project_label`, e.g. `archers`) in `labels` — `["wizard:<wizard_id>", "<project_label>"]`. **Do NOT pass `blockedBy` / `blocks` on the create call** — at create time, dependent issues haven't been created yet. Native relations are populated in the next step once every issue exists.
-11. **Touch heartbeat.**
-11.5. **Populate native Linear blocks/blocked-by relations from the manifest's `depends_on`.** This is what makes the dep graph visible in Linear's UI (the Relations panel on each issue). For every issue in your in-memory list whose `depends_on` is non-empty:
+9.5. **Populate native Linear blocks/blocked-by relations from the manifest's `depends_on`.** This is what makes the dep graph visible in Linear's UI (the Relations panel on each issue). For every issue in your in-memory list whose `depends_on` is non-empty:
     ```
     mcp__plugin_linear_linear__save_issue
       id        = <this issue's identifier, e.g. SOR-171>
       blockedBy = <list of identifiers from this issue's depends_on>
     ```
     `save_issue.blockedBy` is append-only — calling it multiple times with overlapping sets is safe. Issues with empty `depends_on` get no save_issue call here. The `## Depends on` markdown section in the description (from step 10's create) is preserved as a human-readable mirror; it does not replace the structured relation.
-12. **Atomic write of manifest.json.** Write the JSON to `manifest.json.tmp` via the Write tool, then `bash -c 'jq . "<state_dir>/manifest.json.tmp" > "<state_dir>/manifest.json.validated" && mv "<state_dir>/manifest.json.validated" "<state_dir>/manifest.json" && rm -f "<state_dir>/manifest.json.tmp"'`. The `jq .` confirms the content is valid JSON; the `mv` is the atomic publish; coordinator detects completion via `manifest.json` existence.
-13. **Verify the file is non-empty.** `bash -c 'test -s <state_dir>/manifest.json && jq -e . <state_dir>/manifest.json >/dev/null || { echo "DESIGNER_FAILED: manifest empty or invalid"; exit 1; }'`. If it passes, proceed.
-14. **Clean up scratch worktrees.** For each entry under `<state_dir>/scratch/`:
+10. **Atomic write of manifest.json.** Write the JSON to `manifest.json.tmp` via the Write tool, then `bash -c 'jq . "<state_dir>/manifest.json.tmp" > "<state_dir>/manifest.json.validated" && mv "<state_dir>/manifest.json.validated" "<state_dir>/manifest.json" && rm -f "<state_dir>/manifest.json.tmp"'`. The `jq .` confirms the content is valid JSON; the `mv` is the atomic publish; coordinator detects completion via `manifest.json` existence.
+11. **Verify the file is non-empty.** `bash -c 'test -s <state_dir>/manifest.json && jq -e . <state_dir>/manifest.json >/dev/null || { echo "DESIGNER_FAILED: manifest empty or invalid"; exit 1; }'`. If it passes, proceed.
+12. **Clean up scratch worktrees.** For each entry under `<state_dir>/scratch/`:
     ```
     git -C "<bare_clones_dir>/<owner>-<repo>.git" worktree remove "<state_dir>/scratch/<owner>-<repo>"
     ```
     Then `rm -rf "<state_dir>/scratch"`.
-15. **Remove the heartbeat file.**
-16. **Print** `DESIGNER_OK: created epic <linear-project-id> with <N> issues` as your final line (or `DESIGNER_FAILED: ...` if step 13 failed).
+13. **Remove the heartbeat file.**
+14. **Print** `DESIGNER_OK: <N> issues` as your final line (or `DESIGNER_FAILED: ...` if step 11 failed). The legacy form `DESIGNER_OK: created epic <linear-project-id> with <N> issues` is still accepted by completion-detection — do NOT add a synthetic project id back; emit the simpler form.
 
 ## Style
 
