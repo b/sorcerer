@@ -122,6 +122,15 @@ if (( needs_refresh )); then
   fi
 fi
 
+# ---------- Step 2.5: ensure project label exists in Linear ----------
+# Idempotent via .sorcerer/.linear-label-ok marker — burns one Haiku-backed
+# Linear MCP call on first run for a project, then short-circuits. The
+# label is required for designer issue creation (each new SOR issue gets
+# the project label) and for multi-project disambiguation in
+# has-linear-work / step-7 sweeper / design-review consistency.
+bash "$SORCERER_REPO/scripts/ensure-linear-label.sh" "$PROJECT_ROOT" 2>&1 \
+  | while IFS= read -r line; do log "$line"; done || true
+
 # Drain any .sorcerer/requests/*.md into pending-architect entries. Used
 # both by step 3 below and by step 3.7 after auto-drain may have filed
 # a new request.

@@ -6,14 +6,15 @@
 
 **Procedure (run only at the cadence above):**
 
-1. List all SOR issues in `state:Backlog` OR `state:"In Progress"` with `priority IN (1, 2)` (Urgent, High) via `mcp__plugin_linear_linear__list_issues` (team=SOR, limit=250). If the Linear MCP is needs-auth, log `tick: step-7-sweep skipped — Linear MCP needs-auth` and return.
-2. Build the set of `linear_id` values that appear in any active manifest: scan `.sorcerer/wizards/*/manifest.json` for `issues[*].linear_id`. Also include `linear_id`s of any active architect's plan whose sub-epics' mandates cite the issue (since the architect's plan is upstream of the manifest).
-3. For each Urgent/High Linear issue NOT in the active set: this is an orphaned issue.
-4. If the orphaned-set is non-empty, emit ONE consolidated event:
+1. Read `.sorcerer/config.json` for `linear.default_team_key` (e.g. `SOR`) and `linear.project_label` (e.g. `archers`). The project label disambiguates this project's issues from other sorcerer projects sharing the same Linear team — list_issues MUST pass it as a filter.
+2. List all issues for this project's team in `state:Backlog` OR `state:"In Progress"` with `priority IN (1, 2)` (Urgent, High) via `mcp__plugin_linear_linear__list_issues` with `team=<team_key>`, `label=<project_label>`, `limit=250`. If the Linear MCP is needs-auth, log `tick: step-7-sweep skipped — Linear MCP needs-auth` and return.
+3. Build the set of `linear_id` values that appear in any active manifest: scan `.sorcerer/wizards/*/manifest.json` for `issues[*].linear_id`. Also include `linear_id`s of any active architect's plan whose sub-epics' mandates cite the issue (since the architect's plan is upstream of the manifest).
+4. For each Urgent/High Linear issue NOT in the active set: this is an orphaned issue.
+5. If the orphaned-set is non-empty, emit ONE consolidated event:
    ```json
    {"ts":"...","event":"orphan-issues-detected","priority_high_or_urgent":N,"issue_keys":["SOR-X","SOR-Y",...]}
    ```
-5. Auto-file a sorcerer request to incorporate the orphans into a fresh architect run, BUT only when:
+6. Auto-file a sorcerer request to incorporate the orphans into a fresh architect run, BUT only when:
    - The orphan set is **stable across two consecutive sweeps** (recorded via a marker file `.sorcerer/orphan-sweep-prev.json` containing the prior sweep's `issue_keys` array). This avoids racing the operator who's mid-flight filing related issues.
    - The orphan set has at least one Urgent (priority=1) issue.
    - No active architect is currently processing the same `issue_keys` (re-scan plans).
@@ -28,6 +29,6 @@
    - SOR-MMM — ...
    ```
    Step 3 will pick this up on the same tick and route to a new architect.
-6. Update `.sorcerer/orphan-sweep-prev.json` with the current sweep's `issue_keys` for next-cycle comparison.
+7. Update `.sorcerer/orphan-sweep-prev.json` with the current sweep's `issue_keys` for next-cycle comparison.
 
 **Quiet on the happy path.** No events / requests when the orphan set is empty or hasn't been stable for 2 cycles.
