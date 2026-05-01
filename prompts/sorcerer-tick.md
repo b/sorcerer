@@ -173,7 +173,7 @@ The following procedures are extracted to separate prompt files. Read each only 
       "architect_id": "<parent architect uuid>",
       "sub_epic_index": 0,
       "sub_epic_name": "<string>",
-      "epic_linear_id": "<id or null — legacy field, present on entries from designers that ran before save_project was retired; null on new entries>",
+      "epic_linear_id": "<legacy; null on new entries>",
       "manifest_file": "<path or null>",
       "review_wizard_id": "<reviewer's uuid or null>",
       "pid": "<int or null>",
@@ -342,7 +342,7 @@ Cases:
       - <issue_key> [repos: <r1>, <r2>]
       - <issue_key> (depends on: <dep>) [repos: <r>]
     ```
-  - Append to `.sorcerer/events.log` (omit `epic_linear_id` when the manifest doesn't carry it; for backward compatibility include it set to null rather than dropping the key):
+  - Append to `.sorcerer/events.log`:
     ```json
     {"ts":"...","event":"designer-completed","id":"<id>","epic_linear_id":"<epic-id or null>","issues":<N>}
     ```
@@ -504,7 +504,7 @@ For each `active_wizards` entry with `mode: design` and `status: awaiting-tier-3
 
    **Linear MCP unavailable fallback.** If any `get_issue` call returns the needs-auth error (and the Linear MCP isn't reachable this tick), fall back to the older active_wizards/manifest-based check for THIS tick only:
    - Find the dep in `active_wizards` (by `issue_linear_id` or `issue_key`); if status ∈ {merged, done, archived} → satisfied.
-   - If not found in active_wizards but found in some manifest → **unsatisfied** (planned but not yet active; the prior bug treated this as satisfied). Skip.
+   - If not found in active_wizards but found in some manifest → **unsatisfied** (planned but not yet active). Skip.
    - If not found anywhere → **unsatisfied** (outside sorcerer's tracking). Skip.
    Log `tick: dep-check fell back to active_wizards lookup — Linear MCP needs-auth` once per tick.
 
