@@ -31,12 +31,15 @@ fi
 TEAM=$(jq -r '.linear.default_team_key // empty' .sorcerer/config.json)
 [[ -n "$TEAM" ]] || emit "unknown"
 
-# Project label disambiguates issues when multiple sorcerer projects share
-# one Linear team. Default to basename(project_root). When set, the
-# list_issues call below filters by it so other projects' issues don't
-# inflate the "yes there's backlog" answer.
-LABEL=$(jq -r '.linear.project_label // empty' .sorcerer/config.json)
-[[ -n "$LABEL" ]] || LABEL=$(basename "$PROJECT_ROOT")
+# Filter list_issues by the umbrella Linear project's UUID. The umbrella
+# is sorcerer-controlled (created/written by ensure-linear-project.sh),
+# so this filter is stronger than the prior label-based filter — only
+# issues sorcerer-or-an-equivalent put into this project count as
+# "backlog this coordinator should drain". When project_uuid is unset
+# (first-tick race before ensure-linear-project has run), emit unknown
+# so the loop's caller doesn't act on a stale answer.
+PROJECT_UUID=$(jq -r '.linear.project_uuid // empty' .sorcerer/config.json)
+[[ -n "$PROJECT_UUID" ]] || emit "unknown"
 
 # Linear UUIDs already claimed by some live entry. issue_linear_id is the
 # canonical identifier on implement / feedback / rebase wizards. Architect
@@ -63,11 +66,11 @@ fi
 PROMPT=$(cat <<EOF
 Use the mcp__plugin_linear_linear__list_issues tool with these arguments:
   team: "$TEAM"
-  label: "$LABEL"
+  project: "$PROJECT_UUID"
   limit: 250
   includeArchived: false
 
-The label filter ("$LABEL") disambiguates this project's issues from other sorcerer projects sharing the same Linear team. Issues without this label are NOT this project's work and should not be considered.
+The project filter ("$PROJECT_UUID") is the umbrella Linear project for this sorcerer-project, created by scripts/ensure-linear-project.sh. Only issues inside this project belong to this sorcerer-project's work and should be considered.
 
 Filter the result to issues whose statusType is NOT "completed" and NOT "canceled" — i.e., any issue still in Backlog, Todo, In Progress, In Review, Blocked, or any other non-terminal state.
 

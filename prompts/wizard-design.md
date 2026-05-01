@@ -27,8 +27,7 @@ Read your context file at `$SORCERER_CONTEXT_FILE` (JSON). Required fields for d
 Also read these from disk:
 - The project's `config.json` (at `<project-root>/.sorcerer/config.json`, typically two levels up from `state_dir`) — for:
   - `linear.default_team_key` — the Linear team key (e.g. `SOR`)
-  - `linear.project_label` (e.g. `archers`) — the label every issue carries; disambiguates this project's issues from other sorcerer projects sharing the same Linear team. If unset, use `basename(<project-root>)`.
-  - `linear.project_uuid` — the UUID of the umbrella Linear project for this sorcerer-project. ALL `save_issue` calls below MUST pass this as `project=<uuid>` so issues roll up under the single archers umbrella in Linear's UI rather than sitting unprojected. The UUID is created/captured by `scripts/ensure-linear-project.sh` (called from pre-tick), so it always exists by the time you write here. If the field is missing or empty in config.json, fail fast with `DESIGNER_FAILED: linear.project_uuid not set in config; ensure-linear-project.sh has not run yet`.
+  - `linear.project_uuid` — the UUID of the umbrella Linear project for this sorcerer-project. ALL `save_issue` calls below MUST pass this as `project=<uuid>` so issues roll up under the single umbrella in Linear's UI. The umbrella's UUID is the canonical disambiguator across multi-project Linear teams (the prior label-based scheme was retired once the umbrella project pattern landed). The UUID is created/captured by `scripts/ensure-linear-project.sh` (called from pre-tick), so it always exists by the time you write here. If the field is missing or empty in config.json, fail fast with `DESIGNER_FAILED: linear.project_uuid not set in config; ensure-linear-project.sh has not run yet`.
 
 ## Outputs
 
@@ -36,10 +35,10 @@ Also read these from disk:
 
 Via `mcp__plugin_linear_linear__save_issue`, one call per issue:
 - `team`: the team UUID
-- `project`: the umbrella project UUID from `config.json:linear.project_uuid` (e.g. the `archers` umbrella project). MANDATORY — every issue rolls up under the single sorcerer-project umbrella in Linear's UI. Do NOT create a new Linear project per sub-epic; the per-sub-epic explosion produced ~25 orphans before being retired. The architect's `plan.json` and your `manifest.json` are the canonical sub-epic containers; the issue's `## Sub-epic` description line carries the sub-epic name for human-readable context.
+- `project`: the umbrella project UUID from `config.json:linear.project_uuid`. MANDATORY — every issue rolls up under the single sorcerer-project umbrella in Linear's UI, AND downstream filters (`has-linear-work.sh`, step-7 sweeper, design-review consistency) use `project=<uuid>` to disambiguate this project's issues from other sorcerer projects on the same Linear team.
 - `title`: clear, action-oriented
 - `description`: per the template below
-- `labels`: `["<project_label>"]` — exactly one label, the project label from `config.json:linear.project_label` (e.g. `["archers"]`). Required: downstream filters (`has-linear-work.sh`, step-7 sweeper, design-review consistency) key off it to disambiguate this project's issues from other sorcerer projects on the same Linear team. The label is created in advance by `scripts/ensure-linear-label.sh` (called from pre-tick), so it always exists.
+- `labels`: omit, or pass `[]`. Sorcerer no longer attaches a project label — the umbrella project is the disambiguator. The prior `["archers"]` label scheme was retired once the umbrella project pattern landed.
 - **Do NOT pass `wizard:<wizard_id>` in labels.** Per-wizard labels accumulated as ~22+ orphans before being retired.
 
 **The `save_issue` response's `id` field holds the Linear identifier** (e.g. `"SOR-42"`). There is no separate UUID field for issues — the identifier IS the canonical id from the Linear MCP plugin's perspective. Same goes for `get_issue` and `list_issues`. The `identifier` field, if present, is the same value.
@@ -113,7 +112,7 @@ Write to `<state_dir>/manifest.json.tmp`, then `bash -c 'jq . "<state_dir>/manif
    - Touch the heartbeat after each repo.
 6. **Reason about the mandate.** Decompose into atomically-mergeable issues with explicit acceptance criteria. Identify which repos each issue touches, any merge ordering, any inter-issue dependencies.
 7. **Touch heartbeat.**
-8. **Create each Linear issue** via `mcp__plugin_linear_linear__save_issue`. Pass `project=<config.json:linear.project_uuid>` (the umbrella sorcerer-project UUID) on every call so issues roll up under it. The only label is the project label from `config.json:linear.project_label` — pass `labels: ["<project_label>"]`. Do NOT pass any `wizard:<...>` label. **Do NOT pass `blockedBy` / `blocks` on the create call** — at create time, dependent issues haven't been created yet. Native relations are populated in the next step once every issue exists. After each call, capture the response's `id` field — the Linear identifier (e.g. `SOR-42`). Track in your in-memory issue list.
+8. **Create each Linear issue** via `mcp__plugin_linear_linear__save_issue`. Pass `project=<config.json:linear.project_uuid>` (the umbrella sorcerer-project UUID) on every call so issues roll up under it AND downstream filters can find them by project. Do NOT pass any `labels` — the umbrella project is the disambiguator now. **Do NOT pass `blockedBy` / `blocks` on the create call** — at create time, dependent issues haven't been created yet. Native relations are populated in the next step once every issue exists. After each call, capture the response's `id` field — the Linear identifier (e.g. `SOR-42`). Track in your in-memory issue list.
 9. **Touch heartbeat.**
 9.5. **Populate native Linear blocks/blocked-by relations from the manifest's `depends_on`.** This is what makes the dep graph visible in Linear's UI (the Relations panel on each issue). For every issue in your in-memory list whose `depends_on` is non-empty:
     ```

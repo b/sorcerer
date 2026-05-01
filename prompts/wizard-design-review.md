@@ -53,7 +53,7 @@ Walk these checks in order. For each defect found, either edit it (manifest file
 
 6. **Merge ordering.** If `merge_order` is declared on an issue, it MUST be a subset of that issue's `repos`, and the order MUST be derivable from genuine dependencies (e.g. protos before consumers). Strip out-of-list entries. Re-order or remove entirely if the ordering is arbitrary.
 
-7. **Manifest → Linear existence check.** For every issue in `manifest.issues`, call `mcp__plugin_linear_linear__get_issue` with `id = <linear_id>` and confirm the issue exists, is in this project's team, and carries the project label (`config.json:linear.project_label`, e.g. `archers`). A missing-from-Linear or wrong-team / wrong-label issue is a designer bug — fix by re-issuing the `save_issue` with the correct fields, or remove the entry from `manifest.issues` if it's bogus. (The reverse direction — "issues in Linear that aren't in this manifest" — used to be checkable via per-sub-epic Linear project filtering; that mechanism was retired alongside `save_project`. The team-wide label filter would surface ALL sub-epics' issues as candidates, which has too high a false-positive rate to be useful here. Operators handle Linear-side orphans manually.)
+7. **Manifest → Linear existence check.** For every issue in `manifest.issues`, call `mcp__plugin_linear_linear__get_issue` with `id = <linear_id>` and confirm the issue exists, is in this project's team, and carries the umbrella project UUID (`config.json:linear.project_uuid`, e.g. `087f6215-...`). A missing-from-Linear or wrong-team / wrong-project issue is a designer bug — fix by re-issuing the `save_issue` with the correct fields, or remove the entry from `manifest.issues` if it's bogus. (The reverse direction — "issues in the umbrella project that aren't in this manifest" — would surface ALL sub-epics' issues as candidates; the per-sub-epic project filtering that would scope it cleanly was retired alongside `save_project`. Operators handle Linear-side orphans manually.)
 
 8. **Referenced-but-excluded SOR-NNN MUST be tracked.** Grep `manifest.json` AND every issue body in the manifest (case-sensitive) for `SOR-\d+` mentions. For each cited SOR-NNN that is NOT itself a member of `manifest.issues`, classify:
    - **Owned by another active manifest** — the SOR appears in some other designer's `manifest.issues` (cross-sub-epic dependency, already tracked elsewhere). PASS.
@@ -140,6 +140,6 @@ If anything blocks completion (Linear MCP unavailable, manifest malformed beyond
 
 - Edit, don't comment. If you'd write "this issue should be split" — split it.
 - Document every edit in `edits_made` precisely. Include both sides (Linear and manifest) of any change so the audit trail is complete.
-- When splitting an issue, give the new issue(s) the same `labels` array as the original (just the project label, e.g. `["archers"]`). Do NOT re-attach a `wizard:<...>` label — those have been retired alongside `save_project`.
+- When splitting an issue, give the new issue(s) the same `project` value (the umbrella project UUID) as the original; do NOT attach any `labels` (the prior `["archers"]` and `wizard:<...>` schemes have both been retired — the umbrella project is the disambiguator).
 - Keep the summary one paragraph.
 - No code review. You're reviewing the issue set, not implementations.

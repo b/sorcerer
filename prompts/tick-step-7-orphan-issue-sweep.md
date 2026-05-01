@@ -6,8 +6,8 @@
 
 **Procedure (run only at the cadence above):**
 
-1. Read `.sorcerer/config.json` for `linear.default_team_key` (e.g. `SOR`) and `linear.project_label` (e.g. `archers`). The project label disambiguates this project's issues from other sorcerer projects sharing the same Linear team — list_issues MUST pass it as a filter.
-2. List all issues for this project's team in `state:Backlog` OR `state:"In Progress"` with `priority IN (1, 2)` (Urgent, High) via `mcp__plugin_linear_linear__list_issues` with `team=<team_key>`, `label=<project_label>`, `limit=250`. If the Linear MCP is needs-auth, log `tick: step-7-sweep skipped — Linear MCP needs-auth` and return.
+1. Read `.sorcerer/config.json` for `linear.default_team_key` (e.g. `SOR`) and `linear.project_uuid` (the umbrella Linear project for this sorcerer-project, e.g. `087f6215-...`). The project filter disambiguates this project's issues from other sorcerer projects sharing the same Linear team — list_issues MUST pass it.
+2. List all issues for this project's team in `state:Backlog` OR `state:"In Progress"` with `priority IN (1, 2)` (Urgent, High) via `mcp__plugin_linear_linear__list_issues` with `team=<team_key>`, `project=<project_uuid>`, `limit=250`. If the Linear MCP is needs-auth, log `tick: step-7-sweep skipped — Linear MCP needs-auth` and return.
 3. Build the set of `linear_id` values that appear in any active manifest: scan `.sorcerer/wizards/*/manifest.json` for `issues[*].linear_id`. Also include `linear_id`s of any active architect's plan whose sub-epics' mandates cite the issue (since the architect's plan is upstream of the manifest).
 4. For each Urgent/High Linear issue NOT in the active set: this is an orphaned issue.
 5. If the orphaned-set is non-empty, emit ONE consolidated event:
