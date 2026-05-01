@@ -345,8 +345,7 @@ EOF
       explorable_repos: [$repo],
       linear: {
         default_team_key: $team_key,
-        project_label:    $project_label,
-        wizard_label:     "wizard"
+        project_label:    $project_label
       },
       models: {
         coordinator:        "claude-opus-4-7",

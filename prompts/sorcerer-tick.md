@@ -173,7 +173,7 @@ The following procedures are extracted to separate prompt files. Read each only 
       "architect_id": "<parent architect uuid>",
       "sub_epic_index": 0,
       "sub_epic_name": "<string>",
-      "epic_linear_id": "<id or null>",
+      "epic_linear_id": "<id or null — legacy field, present on entries from designers that ran before save_project was retired; null on new entries>",
       "manifest_file": "<path or null>",
       "review_wizard_id": "<reviewer's uuid or null>",
       "pid": "<int or null>",
@@ -335,18 +335,18 @@ if is_pid_alive "<pid>"; then hb="$hb_file"; else hb=absent; fi
 
 Cases:
 - `mf=present, hb=absent` — **completed**:
-  - Read `.sorcerer/wizards/<id>/manifest.json` (parse `epic_linear_id`, `sub_epic_name`, `issues`).
+  - Read `.sorcerer/wizards/<id>/manifest.json` (parse `sub_epic_name`, `issues`; older manifests may also carry `epic_linear_id` — read it if present, else null).
   - Print to **stdout**:
     ```
-    Designer <id> completed (sub-epic "<sub_epic_name>"). Linear epic: <epic_linear_id>. <N> issues:
+    Designer <id> completed (sub-epic "<sub_epic_name>"). <N> issues:
       - <issue_key> [repos: <r1>, <r2>]
       - <issue_key> (depends on: <dep>) [repos: <r>]
     ```
-  - Append to `.sorcerer/events.log`:
+  - Append to `.sorcerer/events.log` (omit `epic_linear_id` when the manifest doesn't carry it; for backward compatibility include it set to null rather than dropping the key):
     ```json
-    {"ts":"...","event":"designer-completed","id":"<id>","epic_linear_id":"<epic-id>","issues":<N>}
+    {"ts":"...","event":"designer-completed","id":"<id>","epic_linear_id":"<epic-id or null>","issues":<N>}
     ```
-  - Update entry: `status: awaiting-design-review`, `manifest_file: .sorcerer/wizards/<id>/manifest.json`, `epic_linear_id: <id>`. The next step (5e, below) will spawn the reviewer.
+  - Update entry: `status: awaiting-design-review`, `manifest_file: .sorcerer/wizards/<id>/manifest.json`, `epic_linear_id: <id from manifest or null>`. The next step (5e, below) will spawn the reviewer.
 - `mf=absent, hb=absent`:
   - If `now - started_at < 30s`, too early to judge. Skip.
   - Otherwise: **run overload detection first** (load `$SORCERER_REPO/prompts/tick-rate-limit-handling.md`). If `is_overloaded_log` matches, follow the 529 path (wizard throttled 60s, NO provider-state change).
