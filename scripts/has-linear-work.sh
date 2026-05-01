@@ -31,6 +31,13 @@ fi
 TEAM=$(jq -r '.linear.default_team_key // empty' .sorcerer/config.json)
 [[ -n "$TEAM" ]] || emit "unknown"
 
+# Project label disambiguates issues when multiple sorcerer projects share
+# one Linear team. Default to basename(project_root). When set, the
+# list_issues call below filters by it so other projects' issues don't
+# inflate the "yes there's backlog" answer.
+LABEL=$(jq -r '.linear.project_label // empty' .sorcerer/config.json)
+[[ -n "$LABEL" ]] || LABEL=$(basename "$PROJECT_ROOT")
+
 # Linear UUIDs already claimed by some live entry. issue_linear_id is the
 # canonical identifier on implement / feedback / rebase wizards. Architect
 # / designer entries don't carry it directly — their plan.json / manifest
@@ -56,8 +63,11 @@ fi
 PROMPT=$(cat <<EOF
 Use the mcp__plugin_linear_linear__list_issues tool with these arguments:
   team: "$TEAM"
+  label: "$LABEL"
   limit: 250
   includeArchived: false
+
+The label filter ("$LABEL") disambiguates this project's issues from other sorcerer projects sharing the same Linear team. Issues without this label are NOT this project's work and should not be considered.
 
 Filter the result to issues whose statusType is NOT "completed" and NOT "canceled" — i.e., any issue still in Backlog, Todo, In Progress, In Review, Blocked, or any other non-terminal state.
 

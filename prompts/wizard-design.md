@@ -25,7 +25,7 @@ Read your context file at `$SORCERER_CONTEXT_FILE` (JSON). Required fields for d
 - `wizard_id` — your UUID, used as the `wizard:<wizard_id>` Linear label
 
 Also read these from disk:
-- The project's `config.json` (at `<project-root>/.sorcerer/config.json`, typically two levels up from `state_dir`) — for `linear.default_team_key`.
+- The project's `config.json` (at `<project-root>/.sorcerer/config.json`, typically two levels up from `state_dir`) — for `linear.default_team_key` AND `linear.project_label` (e.g. `archers`). The project label disambiguates this project's issues from other sorcerer projects sharing the same Linear team. If `project_label` is unset, use `basename(<project-root>)`.
 
 ## Outputs
 
@@ -45,7 +45,7 @@ Via `mcp__plugin_linear_linear__save_issue`, one call per issue:
 - `team`: the team UUID
 - `title`: clear, action-oriented
 - `description`: per the template below
-- `labels`: include `wizard:<wizard_id>`
+- `labels`: include BOTH `wizard:<wizard_id>` AND the project label from `config.json:linear.project_label` (e.g. `["wizard:abc123", "archers"]`). The project label is mandatory — every issue created by a sorcerer designer MUST carry it, since downstream filters (`has-linear-work.sh`, step-7 sweeper, design-review consistency, future cross-project queries) key off it to disambiguate this project's issues from other sorcerer projects on the same Linear team. The label is created in advance by `scripts/ensure-linear-label.sh` (called from pre-tick), so it always exists by the time you write here.
 
 **The `save_issue` response's `id` field holds the Linear identifier** (e.g. `"SOR-42"`). There is no separate UUID field for issues — the identifier IS the canonical id from the Linear MCP plugin's perspective. Same goes for `get_issue` and `list_issues`. The `identifier` field, if present, is the same value.
 
@@ -114,7 +114,7 @@ Write to `<state_dir>/manifest.json.tmp`, then `bash -c 'jq . "<state_dir>/manif
 7. **Touch heartbeat.**
 8. **Create the Linear project** via `mcp__plugin_linear_linear__save_project`. Capture the `id`.
 9. **Touch heartbeat.**
-10. **Create each Linear issue** via `mcp__plugin_linear_linear__save_issue`. After each call, capture the response's `id` field — that's the Linear identifier (e.g. `SOR-42`). Track in your in-memory issue list. Include `wizard:<wizard_id>` in `labels`. **Do NOT pass `blockedBy` / `blocks` on the create call** — at create time, dependent issues haven't been created yet. Native relations are populated in the next step once every issue exists.
+10. **Create each Linear issue** via `mcp__plugin_linear_linear__save_issue`. After each call, capture the response's `id` field — that's the Linear identifier (e.g. `SOR-42`). Track in your in-memory issue list. Include BOTH `wizard:<wizard_id>` AND the project label (from `config.json:linear.project_label`, e.g. `archers`) in `labels` — `["wizard:<wizard_id>", "<project_label>"]`. **Do NOT pass `blockedBy` / `blocks` on the create call** — at create time, dependent issues haven't been created yet. Native relations are populated in the next step once every issue exists.
 11. **Touch heartbeat.**
 11.5. **Populate native Linear blocks/blocked-by relations from the manifest's `depends_on`.** This is what makes the dep graph visible in Linear's UI (the Relations panel on each issue). For every issue in your in-memory list whose `depends_on` is non-empty:
     ```

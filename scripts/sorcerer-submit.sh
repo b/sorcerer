@@ -331,14 +331,21 @@ EOF
   fi
 
   team_key="${SORCERER_DEFAULT_TEAM_KEY:-SOR}"
+  # project_label disambiguates issues when multiple sorcerer projects share
+  # one Linear team. Defaults to basename(project_root); operators with
+  # ambiguous project names can override via SORCERER_PROJECT_LABEL or by
+  # editing config.json after init.
+  project_label="${SORCERER_PROJECT_LABEL:-$(basename "$PROJECT_ROOT")}"
   jq -n \
     --arg repo "github.com/$slug" \
     --arg team_key "$team_key" \
+    --arg project_label "$project_label" \
     '{
       repos:            [$repo],
       explorable_repos: [$repo],
       linear: {
         default_team_key: $team_key,
+        project_label:    $project_label,
         wizard_label:     "wizard"
       },
       models: {
