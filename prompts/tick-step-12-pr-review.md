@@ -1,6 +1,6 @@
 # Tick step 12 — PR-set review and merge
 
-This file is loaded on demand by the coordinator tick. Read it when at least one `active_wizards` entry has `mode: implement` and `status: awaiting-review`. The body below replaces the inline step 12 that used to live in `prompts/sorcerer-tick.md`.
+This file is loaded on demand by the coordinator tick. Read it when at least one `active_wizards` entry has `mode: implement` and `status: awaiting-review`.
 
 ---
 
@@ -188,7 +188,7 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
 
    - **merge** — every `criterion_verdict` is `verified` or `not_applicable`, every anti-pattern check is PASS, and no `reviewer_observations` entry has `disposition: fix`. Proceed to step 6a.
    - **refer-back** — at least one `not_verified` criterion, OR an anti-pattern FAIL, OR a `reviewer_observations` entry with `disposition: fix`. Proceed to step 6b. Aggregate every failure into the concerns list.
-   - **escalate** — high-severity security finding (a `reviewer_observations` entry whose concern is security-bearing AND `disposition: fix`), or anything sorcerer cannot autonomously resolve. Update entry to `status: blocked`, append to `.sorcerer/escalations.log` with `rule: review-escalation` and a description. Also escalate if `refer_back_cycle >= max_refer_back_cycles` (hard cap from `config.json:limits.max_refer_back_cycles`, default 8). Note: `CONFLICTING` / `BEHIND` no longer escalates — step 3 routes those to 6c (rebase) first.
+   - **escalate** — high-severity security finding (a `reviewer_observations` entry whose concern is security-bearing AND `disposition: fix`), or anything sorcerer cannot autonomously resolve. Update entry to `status: blocked`, append to `.sorcerer/escalations.log` with `rule: review-escalation` and a description. Also escalate if `refer_back_cycle >= max_refer_back_cycles` (hard cap from `config.json:limits.max_refer_back_cycles`, default 8). `CONFLICTING` / `BEHIND` does NOT escalate — step 3 routes those to 6c (rebase) first.
 
    The `criterion_verdicts` and `reviewer_observations` arrays plus the anti-pattern check results are consumed by step 6a's audit comment (merge path) and step 6b's refer-back concerns list (refer-back path). Hold all three in memory until the chosen path is complete.
 
