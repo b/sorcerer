@@ -268,7 +268,7 @@ Do not redo steps 1–3 — pre-tick already mutated `sorcerer.json` and `events
 Read `config.json:limits.max_concurrent_wizards` (default 3). Count entries with `status: running` across `active_architects + active_wizards`. For each `pending-architect` entry, while running-count < limit:
 
 ```bash
-nohup bash scripts/spawn-wizard.sh architect \
+nohup bash "$SORCERER_REPO/scripts/spawn-wizard.sh" architect \
   --wizard-id <id> \
   --request-file .sorcerer/architects/<id>/request.md \
   > .sorcerer/architects/<id>/logs/spawn.txt 2>&1 &
@@ -449,7 +449,7 @@ For each `active_architects` entry with `status: awaiting-tier-2`:
        - `mkdir -p .sorcerer/wizards/<wizard-id>/logs`.
        - Spawn the designer:
          ```bash
-         nohup bash scripts/spawn-wizard.sh design \
+         nohup bash "$SORCERER_REPO/scripts/spawn-wizard.sh" design \
            --wizard-id <wizard-id> \
            --architect-plan-file .sorcerer/architects/<arch-id>/plan.json \
            --sub-epic-index <i> \
@@ -537,7 +537,7 @@ The body covers: (1) the pre-flight resource gate (disk floor, provider floor, c
 For each issue prepared in step 9 (worktrees ready, meta.json present):
 
 ```bash
-nohup bash scripts/spawn-wizard.sh implement \
+nohup bash "$SORCERER_REPO/scripts/spawn-wizard.sh" implement \
   --wizard-id <implement-wizard-uuid> \
   --issue-meta-file <state_dir>/meta.json \
   > <state_dir>/logs/spawn.txt 2>&1 &
@@ -600,7 +600,7 @@ mtime=$(stat -c %Y .sorcerer/architects/<id>/heartbeat 2>/dev/null)
   - **Pid is DEAD** — heartbeat stale AND process gone is a real crash. Follow the respawn-or-fail ladder:
     - `respawn_count == 0`: increment, re-spawn:
       ```bash
-      nohup bash scripts/spawn-wizard.sh architect \
+      nohup bash "$SORCERER_REPO/scripts/spawn-wizard.sh" architect \
         --wizard-id <id> \
         --request-file .sorcerer/architects/<id>/request.md \
         > .sorcerer/architects/<id>/logs/spawn.txt 2>&1 &
@@ -628,7 +628,7 @@ mtime=$(stat -c %Y .sorcerer/wizards/<id>/heartbeat 2>/dev/null)
   - **Pid is DEAD** — stale AND gone:
     - `respawn_count == 0`: increment, re-spawn:
       ```bash
-      nohup bash scripts/spawn-wizard.sh design \
+      nohup bash "$SORCERER_REPO/scripts/spawn-wizard.sh" design \
         --wizard-id <id> \
         --architect-plan-file .sorcerer/architects/<architect_id>/plan.json \
         --sub-epic-index <sub_epic_index> \
@@ -673,7 +673,7 @@ mtime=$(stat -c %Y <state_dir>/heartbeat 2>/dev/null)
     - Only if recovery found no PR set: proceed with the respawn-or-fail path below.
     - `respawn_count == 0`: increment, re-spawn:
       ```bash
-      nohup bash scripts/spawn-wizard.sh implement \
+      nohup bash "$SORCERER_REPO/scripts/spawn-wizard.sh" implement \
         --wizard-id <id> \
         --issue-meta-file <state_dir>/meta.json \
         > <state_dir>/logs/spawn.txt 2>&1 &

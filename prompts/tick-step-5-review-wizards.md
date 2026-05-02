@@ -21,7 +21,7 @@ For each `active_architects` entry with `status: awaiting-architect-review` AND 
 2. `mkdir -p .sorcerer/wizards/<reviewer-id>/logs`
 3. Spawn the reviewer:
    ```bash
-   nohup bash scripts/spawn-wizard.sh architect-review \
+   nohup bash "$SORCERER_REPO/scripts/spawn-wizard.sh" architect-review \
      --wizard-id <reviewer-id> \
      --subject-id <arch-id> \
      --subject-state-dir .sorcerer/architects/<arch-id> \
@@ -104,7 +104,7 @@ For each `active_wizards` entry with `mode: design` and `status: awaiting-design
 3. Look up the designer's `architect_id` and `sub_epic_name` (from the designer entry's existing fields).
 4. Spawn the reviewer:
    ```bash
-   nohup bash scripts/spawn-wizard.sh design-review \
+   nohup bash "$SORCERER_REPO/scripts/spawn-wizard.sh" design-review \
      --wizard-id <reviewer-id> \
      --subject-id <designer-id> \
      --subject-state-dir .sorcerer/wizards/<designer-id> \
