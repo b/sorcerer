@@ -453,6 +453,8 @@ Otherwise emit `tick: step-5d/5e — no review-wizard work this tick` and procee
 
 For each `active_architects` entry with `status: awaiting-tier-2`:
 
+**Architect-dependency gate.** If the entry has a non-empty `depends_on_architects: ["<arch-id>", ...]` array, check each listed architect id against `active_architects`. The dependency is satisfied when the listed architect's status is **`completed`** or **`archived`** (terminal-success states); a dependency in any other state (running, awaiting-tier-2, failed, etc.) blocks. If ANY listed dependency is not yet satisfied, emit `tick: step-6 — architect <id-short> waiting on <dep-id-short> (status=<dep-status>); skipping designer spawn` and skip this architect (do not run sub-step 0 either; the epic stays at whatever state step 4a wrote, and the designer fan-out waits). Sorcerer never sets or clears `depends_on_architects`; it's strictly an operator override (edit sorcerer.json to defer one architect's fan-out until others' chains complete). Listed architects that don't exist in `active_architects` are treated as **satisfied** (so historical/archived ids that fell out of state don't permanently block; the operator can audit via events.log if needed).
+
 0. **Update or create Linear epic parent.** Two paths depending on whether step 4a already filed the epic at submit time:
 
    **Path A (typical, post-SOR-537): epic was filed at submit time.** If the architect entry's `epic_linear_id` is non-null AND the architect has just transitioned to `awaiting-tier-2` (i.e. this is the first tick on which the plan is observable), update the existing epic with the plan summary:
