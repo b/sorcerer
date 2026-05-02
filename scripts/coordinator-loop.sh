@@ -23,6 +23,28 @@ if [[ -f "$HOME/.shell_env" ]]; then
   source "$HOME/.shell_env"
 fi
 
+# Defensive: env-inherited GH_APP_INSTALLATION_ID is a footgun. The launching
+# shell may have previously sourced a different project's .token-env (e.g.
+# b/sorcerer), leaving the wrong installation id in scope. Any inner
+# refresh-token.sh call inheriting it would mint tokens for the wrong
+# installation. Unset here so every child either re-sources THIS project's
+# .token-env (which pre-tick.sh writes with the correct id) or invokes
+# refresh-token.sh with --installation-owner / GH_APP_INSTALLATION_OWNER set
+# below.
+unset GH_APP_INSTALLATION_ID
+
+# Export the owner derived from this project's first repo. refresh-token.sh
+# uses this as the owner-filter when no --installation-id is given, so any
+# child that calls it (mid-tick refreshes, ensure-bare-clones,
+# preserve-wizard-wip) lands on the right installation without needing to
+# parse config.json itself.
+if [[ -f .sorcerer/config.json ]]; then
+  _owner=$(jq -r '(.repos // [])[0] // empty' .sorcerer/config.json \
+    | sed -E 's#^github\.com/##; s#/.*$##')
+  [[ -n "$_owner" ]] && export GH_APP_INSTALLATION_OWNER="$_owner"
+  unset _owner
+fi
+
 PID_FILE="$PROJECT_ROOT/.sorcerer/coordinator.pid"
 TICK_PROMPT_FILE="$SORCERER_REPO/prompts/sorcerer-tick.md"
 
