@@ -204,6 +204,17 @@ case "$MODE" in
 
   architect)
     MAX_REFER=$(jq '.limits.max_refer_back_cycles // 5' "$CONFIG")
+    # Cross-architect overlap detection (SOR-533): inject a digest of
+    # other in-flight architects' plans so this architect can detect
+    # sub-epic redundancy before emitting its own plan.json. Empty
+    # array on first/sole architect; populated when ≥2 architects run
+    # in overlapping windows. Architects 2e3ff065 and 8e4b9f06 (both
+    # decomposing SOR-479) collided on 2026-05-01 and produced
+    # SOR-506 + SOR-522 with overlapping mandates; SOR-522 became a
+    # no-op once SOR-506 merged. This digest lets the second architect
+    # see the first's plan and either defer or declare a depends_on.
+    EXISTING_PLANS=$(bash "$SORCERER_REPO/scripts/list-in-flight-architect-plans.sh" \
+      --exclude-id "$WIZARD_ID" "$PROJECT_ROOT" 2>/dev/null || echo '[]')
     jq -n \
       --arg wizard_id "$WIZARD_ID" \
       --arg mode "$MODE" \
@@ -213,6 +224,7 @@ case "$MODE" in
       --arg request_file "$REQUEST_FILE_ABS" \
       --arg bare_clones_dir "$BARE_CLONES_DIR" \
       --argjson max_refer_back_cycles "$MAX_REFER" \
+      --argjson existing_in_flight_plans "$EXISTING_PLANS" \
       --slurpfile cfg "$CONFIG" \
       '{
         wizard_id:$wizard_id, mode:$mode,
@@ -221,7 +233,8 @@ case "$MODE" in
         request_file:$request_file,
         explorable_repos: ($cfg[0].explorable_repos // []),
         repos: ($cfg[0].repos // []),
-        bare_clones_dir:$bare_clones_dir
+        bare_clones_dir:$bare_clones_dir,
+        existing_in_flight_plans:$existing_in_flight_plans
       }' \
       > "$CONTEXT_FILE"
     ;;

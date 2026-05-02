@@ -17,6 +17,7 @@ Read your context file at `$SORCERER_CONTEXT_FILE` (JSON). Required fields:
 - `bare_clones_dir` — directory containing bare clones (`<owner>-<repo>.git/`) for each entry in `explorable_repos`
 - `state_dir` — where you write `design.md` and `plan.json`
 - `heartbeat_file` — touch this between steps
+- `existing_in_flight_plans` — JSON array of in-flight architects' plan digests (empty array when you're the only architect). Each entry: `{architect_id, request_excerpt, sub_epics: [{name, mandate_excerpt, cited_sors, repos}]}`. Use this to detect cross-architect sub-epic redundancy before emitting your own plan.
 
 ## Outputs
 
@@ -37,15 +38,24 @@ Read your context file at `$SORCERER_CONTEXT_FILE` (JSON). Required fields:
          "mandate": "<what this sub-epic owns, and what it explicitly does NOT own; multi-line text uses \\n>",
          "repos": ["<owner/repo>"],
          "explorable_repos": ["<subset of architect's explorable_repos>"],
-         "depends_on": ["<other sub-epic names>"]
+         "depends_on": ["<other sub-epic names from THIS plan>"]
        }
      ],
-     "cross_sub_epic_contracts": "<interfaces and invariants sub-epics must honor between each other; empty string if none>"
+     "cross_sub_epic_contracts": "<interfaces and invariants sub-epics must honor between each other; empty string if none>",
+     "deferred_to_in_flight": [
+       {
+         "reason": "<why this sub-epic is being deferred>",
+         "deferred_sub_epic_name": "<the name your sub-epic would have had>",
+         "in_flight_architect_id": "<their 8-char architect id>",
+         "in_flight_sub_epic_name": "<their sub-epic name that subsumes or blocks this>"
+       }
+     ]
    }
    ```
 
    Notes on the fields:
-   - `depends_on` is optional — omit the key (or use `[]`) when the sub-epic has no prerequisites. **STRICT gate**: a sub-epic listed here must be fully merged before the dependent sub-epic's designer can even begin. Only declare a dep when the dependent sub-epic genuinely cannot be designed or implemented without the other's merged code — otherwise it needlessly serializes work.
+   - `depends_on` is optional — omit the key (or use `[]`) when the sub-epic has no prerequisites. Names MUST refer to other sub-epics in THIS plan (intra-plan only). **STRICT gate**: a sub-epic listed here must be fully merged before the dependent sub-epic's designer can even begin. Only declare a dep when the dependent sub-epic genuinely cannot be designed or implemented without the other's merged code — otherwise it needlessly serializes work.
+   - `deferred_to_in_flight` is optional — omit the key (or use `[]`) when there's no overlap with in-flight architects. Entries are informational and do NOT spawn designers; coordinator step 6 only iterates `sub_epics`.
    - `mandate` and `cross_sub_epic_contracts` are plain JSON strings; encode newlines as `\n` and preserve internal quotes as `\"`. The Write tool handles that escaping for you when you pass the string.
 
 ## Workflow
@@ -63,6 +73,21 @@ Read your context file at `$SORCERER_CONTEXT_FILE` (JSON). Required fields:
    - Read the worktree's `CLAUDE.md` (if present) and the contents of its `docs/` directory.
    - Touch the heartbeat after each repo finishes.
 5. **Reason about the request.** Identify components involved, which repos host them, dependencies between them, and the natural seams for sub-epic boundaries.
+
+   **Overlap check against in-flight architects.** Before locking in your sub-epic list, walk `existing_in_flight_plans` from your context file. For each sub-epic you intend to emit, compare it against every entry in every in-flight plan:
+
+   - **Same SOR-NNN cited.** If your sub-epic's mandate cites a `SOR-NNN` that any in-flight sub-epic also cites in its `cited_sors`, you have an overlap. The other architect already plans to address this Linear issue.
+   - **Overlapping `repos` × code surface.** If your sub-epic targets the same primary file/module as an in-flight sub-epic (cross-reference your draft mandate against their `mandate_excerpt`), you have an overlap.
+
+   **Disposition rules** (apply per overlap):
+
+   - **Strict-subset overlap** — your sub-epic's work is fully contained within the in-flight one (their mandate covers your intent and more). DO NOT emit your sub-epic. Drop it from `plan.json` entirely. Add a top-level `deferred_to_in_flight` array entry in `plan.json` with shape `{"reason":"<why>", "deferred_sub_epic_name":"<your name>", "in_flight_architect_id":"<their 8-char id>", "in_flight_sub_epic_name":"<their name>"}`. The deferred entry is informational and does not spawn a designer.
+   - **Disjoint with hard dep on their merged shape** — your sub-epic adds work the in-flight sub-epic doesn't cover, but you can't be designed until their code shape is on `main` (e.g., they own the type plumbing; you own the consumer wire-up that needs the type to exist). DO NOT emit your sub-epic in this run. Add a `deferred_to_in_flight` entry with `reason: "needs <their sub-epic> merged first; re-run architect after that lands"`. The next architect run on the same request — issued after their work merges — will emit your sub-epic against the post-merge main. Single-plan dep gates only need to handle intra-plan ordering this way.
+   - **Disjoint that can design against either shape** — your sub-epic touches the same code surface but doesn't strictly depend on their shape (you can design against current main and rebase on whichever shape lands). Emit the sub-epic. Add a one-line note in `cross_sub_epic_contracts`: "Sub-epic X coordinates with in-flight architect `<their 8-char id>`'s `<their sub-epic>` — both touch `<file/module>`; first to merge sets the canonical shape, second rebases."
+
+   The honest test for disposition: "if their sub-epic merges first, will my sub-epic still have non-empty work that I could design today?" If no → strict-subset (defer). If yes-but-needs-their-shape → hard dep (defer to next architect run). If yes-and-shape-agnostic → emit with contracts note.
+
+   When `existing_in_flight_plans` is empty, skip this step entirely.
 6. **Touch heartbeat** before writing.
 7. **Write `design.md`** with the five sections above.
 8. **Write `plan.json` atomically.** First Write the content to `<state_dir>/plan.json.tmp`. Then `bash -c 'jq . "<state_dir>/plan.json.tmp" > "<state_dir>/plan.json.validated" && mv "<state_dir>/plan.json.validated" "<state_dir>/plan.json" && rm -f "<state_dir>/plan.json.tmp"'`. The `jq .` validates it's proper JSON before publishing; the `mv` is the atomic publish: the coordinator's completion detection checks for the canonical `plan.json` path, so a partial `.tmp` or an invalid file never triggers false-completion. If the architect crashes before the `mv`, only `plan.json.tmp` exists, and the coordinator correctly treats the run as not-yet-complete.
