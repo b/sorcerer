@@ -68,15 +68,15 @@ Read your context file at `$SORCERER_CONTEXT_FILE` (JSON). Required fields:
 7. **Reply to false positives.** For each `reply` concern:
    - `gh pr comment <pr_url> --body "<explanation>"` — threaded reply to the specific PR's review comment is preferred via `gh api` if needed, but a top-level comment works too.
 
-8. **Run the workspace pre-push gates.** In each affected repo's worktree: `bash $SORCERER_REPO/scripts/pre-push-gates.sh "<worktree>"`. Exit 0 = all clean. Non-zero = the failing gate's name and output are the last block printed; fix the underlying issue and re-run until clean. Same gates CI runs (fmt + clippy + build + test for Rust workspaces); skipping them here just guarantees another refer-back cycle.
-
-9. **Commit and push per affected repo.** Explicit file staging (not `git add -A`):
+8. **Commit and push per affected repo.** Explicit file staging (not `git add -A`):
    ```bash
    cd "${worktree_paths[$repo]}"
    git add <specific paths>
    git commit -m "address review concerns (cycle <N>)"
    git push
    ```
+   A sorcerer-installed pre-push hook runs the workspace gates (fmt apply+verify, clippy `-D warnings`, build, tests) at push time; non-zero exit rejects the push. Iterate fixes locally until the push succeeds. Do NOT pass `--no-verify`.
+
    Do NOT add Co-Authored-By, "Generated with Claude Code," or any other automated-attribution trailer to commit messages.
 
 10. **Touch heartbeat.**

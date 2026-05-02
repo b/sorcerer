@@ -91,8 +91,9 @@ For each repo touched:
 1. Touch heartbeat.
 2. `cd <worktree_paths[repo]>`.
 3. `git diff` and self-review every line. Apply the /wizard skill's adversarial questions: what if this runs twice? what if input is null/empty/huge? race conditions? security?
-4. **Run the workspace pre-push gates** via `bash $SORCERER_REPO/scripts/pre-push-gates.sh "<worktree_paths[repo]>"`. The script runs whatever CI runs on every PR (auto-detects the workspace shape; for Rust: fmt apply + verify, clippy with -D warnings, build, tests). Exit 0 = all clean. Non-zero = the failing gate's name and output are the last block printed; fix the underlying issue and re-run until clean. A failing gate would trigger an immediate refer-back cycle on the merged-PR review path and burn an Opus run — running them here costs nothing.
-5. Fix anything you found in step 3 before pushing.
+4. Fix anything you found in step 3 before pushing.
+
+A sorcerer-installed git pre-push hook will run the workspace gates (fmt apply+verify, clippy with `-D warnings`, build, tests) at `git push` time. If a gate fails the push is rejected; iterate locally until the push succeeds. Do NOT pass `--no-verify` to bypass the hook.
 
 ### Phase 8 — Commit, push, open PRs
 

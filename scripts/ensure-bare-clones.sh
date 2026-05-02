@@ -123,3 +123,17 @@ EOF
   mv "${target}.tmp" "$target"
   echo "  done: $target"
 done
+
+# Install / refresh the pre-push hook in every bare clone we touched.
+# Bare-clone hooks/ is shared by every worktree spawned off the bare,
+# so a single install gates pushes from every wizard worktree. Idempotent
+# (overwrites with current content).
+for spec in "$@"; do
+  slug="${spec#github.com/}"
+  owner="${slug%%/*}"
+  repo="${slug##*/}"
+  target=".sorcerer/repos/${owner}-${repo}.git"
+  [[ -d "$target" ]] || continue
+  bash "$SORCERER_REPO/scripts/install-prepush-hook.sh" "$target" > /dev/null \
+    || echo "WARN: failed to install pre-push hook in $target" >&2
+done
