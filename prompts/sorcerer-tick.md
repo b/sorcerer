@@ -265,6 +265,35 @@ Do not redo steps 1–3 — pre-tick already mutated `sorcerer.json` and `events
 
 ### Step 4 — Spawn architects
 
+#### 4a. File Linear epic issue at submit time
+
+Before spawning each architect, give the request a Linear-side container so operators can see submitted-but-not-yet-architected work in Linear (and so designer sub-issues have a `parentId` to link to).
+
+For each `active_architects` entry with `status: pending-architect` AND `epic_linear_id == null`:
+
+- Read `.sorcerer/architects/<id>/request.md`.
+- Read `<project-root>/.sorcerer/config.json:linear.project_uuid` for the target project.
+- Derive the **title**: first non-empty, non-whitespace line of `request.md`, stripped of leading `#` chars; cap to ~80 chars; prefix with `Epic: `.
+- Derive the **description**: a markdown body containing (a) `## Request` section with the full request text quoted, (b) a footer line `<!-- sorcerer architect <arch-id-short> request <ts> -->` so the issue is identifiable as architect-emitted.
+- Call `mcp__plugin_linear_linear__save_issue` with:
+  - `title`: from above.
+  - `description`: from above.
+  - `project`: `<config.json:linear.project_uuid>`.
+  - `state`: `"Todo"`.
+  - `labels`: omit. **Do NOT pass `parentId`** — request issues are top-level epics.
+- Capture the response's `id` (e.g. `SOR-540`).
+- Update the architect entry: `epic_linear_id: "<id>"`. Atomic write of `sorcerer.json`.
+- Append event:
+  ```json
+  {"ts":"...","event":"epic-issue-filed","architect_id":"<arch-id>","epic_linear_id":"<id>","stage":"submit"}
+  ```
+
+If `save_issue` fails: append an `epic-file-failed` escalation, leave `epic_linear_id` null, and proceed to the spawn step below — the architect can still run; step 6 sub-step 0 below will retry the create path on a later tick.
+
+If `epic_linear_id` is already non-null, skip — idempotent.
+
+#### 4b. Architect spawn
+
 Read `config.json:limits.max_concurrent_wizards` (default 3). Count entries with `status: running` across `active_architects + active_wizards`. For each `pending-architect` entry, while running-count < limit:
 
 ```bash
@@ -424,28 +453,42 @@ Otherwise emit `tick: step-5d/5e — no review-wizard work this tick` and procee
 
 For each `active_architects` entry with `status: awaiting-tier-2`:
 
-0. **Ensure Linear epic parent exists.** If the architect entry's `epic_linear_id` is null:
+0. **Update or create Linear epic parent.** Two paths depending on whether step 4a already filed the epic at submit time:
 
+   **Path A (typical, post-SOR-537): epic was filed at submit time.** If the architect entry's `epic_linear_id` is non-null AND the architect has just transitioned to `awaiting-tier-2` (i.e. this is the first tick on which the plan is observable), update the existing epic with the plan summary:
+   - Read `.sorcerer/architects/<arch-id>/design.md` (first ~500 chars of the **Goal** section).
+   - Read `.sorcerer/architects/<arch-id>/plan.json` and extract the bulleted list of `sub_epics[].name`.
+   - Compose the updated description: original request body (preserved from step 4a's create) + a new `## Plan` section with the design summary + sub-epic bullets + footer line `<!-- sorcerer architect <arch-id-short> -->`.
+   - Call `mcp__plugin_linear_linear__save_issue` with:
+     - `id`: `<epic_linear_id>`
+     - `description`: the updated body
+     - `state`: `"In Progress"`
+     - **Do NOT pass `parentId`** — leave the epic top-level.
+   - Append event:
+     ```json
+     {"ts":"...","event":"epic-issue-updated","architect_id":"<arch-id>","epic_linear_id":"<id>","stage":"plan-ready"}
+     ```
+   To avoid re-applying this update on every subsequent tick, gate it: skip when an `epic-issue-updated` event with `stage: plan-ready` already exists in events.log for this `architect_id`. (The CREATE-time `epic-issue-filed` event from step 4a is distinct.)
+
+   **Path B (backwards-compat, legacy): epic was never filed.** If the architect entry's `epic_linear_id` is null (legacy entry from before SOR-537 landed, or step 4a's create failed transiently):
    - Read `.sorcerer/architects/<arch-id>/request.md` for the title seed; use the first non-empty line, stripped of leading `#` chars and limited to ~80 chars.
    - Read `.sorcerer/architects/<arch-id>/design.md` for the description (first ~500 chars of the **Goal** section, plus a bulleted list of `plan.json:sub_epics[].name`). If `design.md` is missing, fall back to a 1-line summary derived from request.md.
    - Read `<project-root>/.sorcerer/config.json:linear.project_uuid` for the target project.
    - Call `mcp__plugin_linear_linear__save_issue` once with:
      - `title`: `Epic: <derived title>`
-     - `description`: the markdown body composed above, ending with a footer line `<!-- sorcerer architect <arch-id-short> -->` so this epic is identifiable as architect-emitted.
+     - `description`: the markdown body composed above, ending with a footer line `<!-- sorcerer architect <arch-id-short> -->`.
      - `project`: `<config.json:linear.project_uuid>`
      - `state`: `"In Progress"`
      - `labels`: omit.
      - **Do NOT pass `parentId`** — epics are top-level.
-   - Capture the response's `id` (e.g. `SOR-540`).
+   - Capture the response's `id`.
    - Update the architect entry: `epic_linear_id: "<id>"`. Atomic write of `sorcerer.json`.
    - Append event:
      ```json
-     {"ts":"...","event":"epic-issue-filed","architect_id":"<arch-id>","epic_linear_id":"<id>"}
+     {"ts":"...","event":"epic-issue-filed","architect_id":"<arch-id>","epic_linear_id":"<id>","stage":"plan-ready-fallback"}
      ```
 
-   If `epic_linear_id` is already non-null, skip — idempotent re-entry (this step runs every tick the architect is in `awaiting-tier-2`, but does work only once).
-
-   On any `save_issue` failure: append an `epic-file-failed` escalation with `rule: epic-file-failed`, leave `epic_linear_id` null, and proceed with designer spawn anyway. Designers tolerate `epic_linear_id: null` (they fall back to no `parentId`); the epic can be created retroactively on a later tick.
+   On any `save_issue` failure (either path): append an `epic-file-failed` escalation with `rule: epic-file-failed`, leave the entry as-is, and proceed with designer spawn anyway. Designers tolerate `epic_linear_id: null`; the epic can be created/updated on a later tick.
 
 1. Read `.sorcerer/architects/<arch-id>/plan.json`. Parse `sub_epics` (list of objects with `name`, `mandate`, `repos`, `explorable_repos`, optional `depends_on`).
 
