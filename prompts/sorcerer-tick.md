@@ -453,8 +453,6 @@ Otherwise emit `tick: step-5d/5e — no review-wizard work this tick` and procee
 
 For each `active_architects` entry with `status: awaiting-tier-2`:
 
-**Pause gate.** If the entry has `paused: true`, emit `tick: step-6 — architect <id-short> paused; skipping designer spawn` and skip this architect (do not run sub-step 0 either; the epic stays in whatever state it's in until the operator clears the pause). The pause flag is operator-set: an operator who wants to defer an architect's downstream fan-out (so other in-flight architects' chains complete first) edits sorcerer.json and sets `paused: true` on the entry. Clearing the pause is the operator removing the field (or setting it to `false`); the next tick picks up where it left off. Sorcerer itself never sets or clears this flag — it's strictly an operator override.
-
 0. **Update or create Linear epic parent.** Two paths depending on whether step 4a already filed the epic at submit time:
 
    **Path A (typical, post-SOR-537): epic was filed at submit time.** If the architect entry's `epic_linear_id` is non-null AND the architect has just transitioned to `awaiting-tier-2` (i.e. this is the first tick on which the plan is observable), update the existing epic with the plan summary:
