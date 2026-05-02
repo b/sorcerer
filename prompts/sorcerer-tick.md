@@ -694,9 +694,18 @@ The two helpers (`scripts/discover-orphan-prs.sh`, `scripts/adopt-orphan-pr.sh`)
 
 ### Step 12 — PR-set review and merge
 
-**Lazy-loaded.** If at least one `active_wizards` entry has `mode: implement` and `status: awaiting-review`, Read `$SORCERER_REPO/prompts/tick-step-12-pr-review.md` and follow it. Otherwise emit `step 12: skipped — no awaiting-review entries` and proceed to step 13. The body covers PR fetching, the merge-readiness gate, CI/bot/LLM gates, refer-back/rebase routing, and the second-opinion review for the merge path; do NOT skip any of those when an awaiting-review entry exists.
+**Lazy-loaded.** If at least one `active_wizards` entry has `mode: implement` and `status: awaiting-review`, Read `$SORCERER_REPO/prompts/tick-step-12-pr-review.md` and follow it. Otherwise emit `step 12: skipped — no awaiting-review entries` and proceed to step 13. The body covers PR fetching, the merge-readiness gate, CI/bot/LLM gates, refer-back/rebase routing, and the second-opinion review for the merge path.
 
 (The step body lives in a separate file because it is the largest step in the tick and most ticks have no awaiting-review work — paying for those ~30 KB of prompt every tick is wasted budget when the gate isn't firing.)
+
+**Step 12 is the highest-priority work the tick can do.** Reviewing-and-merging completed work converts blocked concurrency slots to free ones; spawning more wizards into a backlog of un-reviewed work just lengthens the queue. When the tick is under context-budget pressure:
+
+1. Process at least the first `min(2, awaiting_review_count)` entries through full Stages 6.1–6.6 every tick. Two is the per-tick floor; the tick is allowed to do more if budget permits. If you cannot fit two, that is a signal you've spent budget on lower-priority work earlier in the tick — fix that, not step 12.
+2. **Defer LATER steps (4 / 6 / 7 / 8 / 10) before deferring step 12.** Step 4 (architect spawn) and step 6 (designer spawn) and step 8/10 (implement spawn) all add MORE work to the pipeline — postponing them by one tick costs ≤ one tick of latency. Step 12 deferrals cost a full tick per CLEAN+MERGEABLE PR not processed, AND those PRs still hold their concurrency slots in the meantime.
+3. Skip steps 6/7/8/10 entirely this tick if processing the first 2 awaiting-review entries through 6.1–6.6 is the only way to fit step 12. Emit `step <N>: deferred — step 12 backlog has <K> CLEAN+MERGEABLE entries, prioritizing review` for each skipped step.
+4. The selection rule for which `awaiting-review` entries to process this tick: **CLEAN + SUCCESS** entries first (ready to merge cleanly), oldest `started_at` first within that bucket. Then UNSTABLE/CONFLICTING. Then anything else. CI in-progress entries (per spec 6.1's "Defer if any PR is not yet ready for review") still defer regardless of position in this list.
+
+Step 12 is NEVER skipped under context-budget pressure when there is at least one CLEAN+MERGEABLE awaiting-review entry. If the tick is genuinely too full, that is a tick-prompt bug, not a step-12 problem.
 
 
 ### Steps 13-14 — Already done by post-tick
