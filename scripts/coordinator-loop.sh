@@ -346,12 +346,30 @@ while true; do
     # grown past that ceiling and execve() fails with E2BIG before claude
     # even starts. Stdin has no such cap. `claude -p` reads its prompt from
     # stdin when no positional argument is supplied.
-    if printf '%s' "$TICK_PROMPT" | claude -p "${TICK_ARGS[@]}" 2>&1 | tee "$TICK_LOG"; then
+    #
+    # `timeout` watchdog (SOR-554): a wedged tick (e.g. polling-on-pgrep loop
+    # that pgrep returns empty into) blocks this pipeline indefinitely.
+    # `timeout` SIGTERMs claude after $TICK_TIMEOUT seconds, then SIGKILLs
+    # 10s later if it hasn't exited. The non-zero exit propagates through
+    # PIPESTATUS to the loop's tick_rc and the next iteration spawns a fresh
+    # tick. Default 1800s (30 min) is comfortable upper bound on legitimate
+    # multi-PR review ticks; raise via TICK_TIMEOUT env var if needed.
+    TICK_TIMEOUT="${TICK_TIMEOUT:-1800}"
+    if printf '%s' "$TICK_PROMPT" \
+         | timeout --kill-after=10 "$TICK_TIMEOUT" claude -p "${TICK_ARGS[@]}" 2>&1 \
+         | tee "$TICK_LOG"; then
       : # tick succeeded
     else
-      # PIPESTATUS[1] is the claude -p exit code now that printf is upstream
-      # in the pipe (PIPESTATUS[0] = printf, [1] = claude, [2] = tee).
-      exit "${PIPESTATUS[1]:-1}"
+      # PIPESTATUS[1] is the claude/timeout exit code now that printf is upstream
+      # in the pipe (PIPESTATUS[0] = printf, [1] = timeout/claude, [2] = tee).
+      rc="${PIPESTATUS[1]:-1}"
+      # `timeout` exits 124 on SIGTERM cap, 137 (128+9) on SIGKILL after-cap.
+      if (( rc == 124 || rc == 137 )); then
+        echo "[$(ts)] tick timed out after ${TICK_TIMEOUT}s (rc=$rc); respawning" >&2
+        printf '{"ts":"%s","event":"tick-timeout","timeout_s":%s,"rc":%s}\n' \
+          "$(ts)" "$TICK_TIMEOUT" "$rc" >> .sorcerer/events.log
+      fi
+      exit "$rc"
     fi
   )
   tick_rc=$?

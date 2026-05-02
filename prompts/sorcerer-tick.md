@@ -13,6 +13,21 @@ You are running as the sorcerer coordinator. Each invocation is one execution of
 - Write `.sorcerer/sorcerer.json` via `jq` (NOT bash heredocs) so all field values serialize correctly.
 - Stay terse. After each step emit a one-line status (e.g. `step 6: spawned 1 designer`). On unrecoverable failure print `TICK_FAILED: step <N> — <reason>` and stop.
 
+## Forbidden bash patterns
+
+The tick must not poll-wait on external state. Several shapes that look reasonable wedge in subtle ways and have hung the tick for 40+ minutes in production. Coord-loop now wraps `claude -p` in `timeout 1800s` which kills a stuck tick — but a wedged tick still wastes Opus budget until the timeout fires, so prefer not to wedge in the first place.
+
+**Forbidden:**
+
+- `until [[ ! -e /proc/$(pgrep -f "<thing>") ]]; do sleep N; done`. When the target process has already exited (or never started), `pgrep` returns empty, the substitution reduces to literal `/proc/`, and the negated existence test is forever false. The canonical wedge.
+- `while ! <some-condition>; do sleep N; done`. Any polling loop on external state.
+- Repeated `gh pr view` / `gh pr checks` / `mcp__plugin_linear_linear__list_*` invocations spaced over time.
+- Any shell loop that periodically touches a heartbeat / re-reads sorcerer.json / re-greps a process tree.
+
+**If you spawned a subprocess and need to wait for it:** capture its pid with `&` and `wait <pid>`, OR run synchronously without `&`. Never poll via `pgrep`. The synchronous form blocks naturally and exits when the subprocess does. The `wait` form blocks on a known pid and races correctly when the subprocess exits before `wait` is called (it returns the captured exit code).
+
+**If a subprocess might run longer than the tick budget:** spawn it detached (`nohup ... &`), record its pid in `sorcerer.json` as a wizard entry, and let the *next* tick check completion via the standard heartbeat-poll path (which does NOT loop within a tick). The tick is single-shot per coord iteration; long waits cross tick boundaries by design.
+
 ## User notifications (PushNotification)
 
 The user is not watching the terminal between ticks — events.log is attached only when they run `/sorcerer attach`. To pull their attention back when something meaningful happens, fire the `PushNotification` tool — but ONLY for milestone events, never for routine progress.
