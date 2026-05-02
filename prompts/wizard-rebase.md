@@ -68,9 +68,7 @@ Read your context file at `$SORCERER_CONTEXT_FILE` (JSON). Required fields:
 
    e. Touch heartbeat after each file resolution for long rebases.
 
-   f. **Run the workspace pre-push gates.** `bash $SORCERER_REPO/scripts/pre-push-gates.sh "<worktree>"`. The rebase may have silently broken your code even without conflict markers (symbol renames, import changes, signature shifts). On any gate failure, do NOT force-push; try to fix inline (commit with message `rebase: adapt to upstream <short description>` and either `git commit --amend --no-edit` it into the rebased top commit or land as a follow-up commit if substantive). If unfixable in this session: `git rebase --abort` if still in progress OR reset to the pre-rebase state, then print `REBASE_FAILED: <gate> failed post-rebase in <repo> — <one-line reason>`, exit non-zero.
-
-   g. `git push --force-with-lease origin "$branch_name"`. `--force-with-lease` refuses to push if the remote has moved since your last fetch — that would mean someone else pushed to your branch, which shouldn't happen under sorcerer but the safety is free.
+   f. `git push --force-with-lease origin "$branch_name"`. A sorcerer-installed pre-push hook runs the workspace gates (fmt apply+verify, clippy `-D warnings`, build, tests) and rejects the push on any gate failure. The rebase may have silently broken your code even without conflict markers (symbol renames, import changes, signature shifts) — that's exactly what the hook catches. On rejection: do NOT pass `--no-verify`. Try to fix inline (commit with message `rebase: adapt to upstream <short description>` and either `git commit --amend --no-edit` it into the rebased top commit or land as a follow-up commit if substantive). If unfixable in this session: `git rebase --abort` if still in progress OR reset to the pre-rebase state, then print `REBASE_FAILED: <gate> failed post-rebase in <repo> — <one-line reason>`, exit non-zero. `--force-with-lease` refuses to push if the remote has moved since your last fetch — that would mean someone else pushed to your branch, which shouldn't happen under sorcerer but the safety is free.
 
 4. **Touch heartbeat.**
 
