@@ -91,13 +91,7 @@ For each repo touched:
 1. Touch heartbeat.
 2. `cd <worktree_paths[repo]>`.
 3. `git diff` and self-review every line. Apply the /wizard skill's adversarial questions: what if this runs twice? what if input is null/empty/huge? race conditions? security?
-4. **Run the workspace's pre-push gates.** Whatever CI runs on every PR, run it here so you don't push a PR that fails on a routine check. For Rust workspaces this is at minimum:
-   - `cargo fmt --all` (apply formatting; CI runs `cargo fmt --all -- --check` and fails on any diff)
-   - `cargo clippy --workspace --all-targets -- -D warnings`
-   - `cargo build --workspace --locked --all-targets`
-   - `cargo test --workspace --locked` (or per-crate equivalent if the diff is scoped)
-
-   A failing gate triggers an immediate refer-back cycle on the merged-PR review path and burns an Opus run — running them here costs nothing. Apply fixes (auto-format, lint warnings, broken tests) and re-run until clean.
+4. **Run the workspace pre-push gates** via `bash $SORCERER_REPO/scripts/pre-push-gates.sh "<worktree_paths[repo]>"`. The script runs whatever CI runs on every PR (auto-detects the workspace shape; for Rust: fmt apply + verify, clippy with -D warnings, build, tests). Exit 0 = all clean. Non-zero = the failing gate's name and output are the last block printed; fix the underlying issue and re-run until clean. A failing gate would trigger an immediate refer-back cycle on the merged-PR review path and burn an Opus run — running them here costs nothing.
 5. Fix anything you found in step 3 before pushing.
 
 ### Phase 8 — Commit, push, open PRs
