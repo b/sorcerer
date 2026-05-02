@@ -102,6 +102,26 @@ Read your context file at `$SORCERER_CONTEXT_FILE` (JSON). Required fields:
 
 If at any point you cannot complete the task (corrupt bare clone, request is incoherent, missing context field, etc.), remove the heartbeat file, print `ARCHITECT_FAILED: <one-line reason>`, and exit non-zero (just print and stop — the wrapper script will detect the missing OK marker).
 
+## Cross-sub-epic contract restrictions
+
+**Epic-level coordination state belongs in Linear, not in a markdown file in the repo.**
+
+Forbidden patterns in `cross_sub_epic_contracts` and in any sub-epic mandate:
+
+- **No "all sub-epics append to a shared row in `<doc>.md`"** umbrella tracker patterns. Every sub-epic's PR touching the same row produces guaranteed merge conflicts and forces a serial rebase chain. The pattern is a footgun, not a feature.
+- **No "first sub-epic to merge seeds the row, others append"** patterns. Same conflict surface, just deferred.
+- **No "every sub-epic updates the umbrella's status column"** patterns.
+- **No requirements that two or more sub-epics share-write any single file or section**, full stop. Per-stub rows in catalog files (where each sub-epic owns its own row, no shared row) are fine — that's the existing per-PR convention and produces no conflicts.
+
+How to track epic-level coordination instead:
+
+- The architect's `design.md` is the durable artifact for the design itself. Write it once; sub-epics reference it.
+- Sub-epic membership and progress are tracked in Linear: the designer creates each sub-epic as a Linear issue, and the operator can group them via Linear's parent/child relations or labels. Sorcerer's coordinator state (`sorcerer.json`, events.log) tracks merge progress.
+- If a "what's left in this epic" view is needed, that view comes from Linear (filter by parent issue, label, or project), not from a markdown column that PRs race to update.
+- If a per-stub catalog file like `ABSENT_FUNCTIONALITY.md` is part of the project's review convention, each sub-epic's PR may add its own *new* row for the stub it introduces. That is per-PR ownership and produces no conflicts. What's forbidden is multiple sub-epics share-writing the *same* row.
+
+If you're tempted to write a contract like "all sub-epics append to the SOR-NNN umbrella row" — stop and re-cast it as Linear-tracked instead. The contract section should describe code-level interfaces (types, function signatures, invariants between modules), not docs-coordination protocols.
+
 ## Style
 
 - Be concrete. Reference specific files, modules, configuration, environment variables, etc.
