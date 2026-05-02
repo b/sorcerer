@@ -68,7 +68,7 @@ Read your context file at `$SORCERER_CONTEXT_FILE` (JSON). Required fields:
 7. **Reply to false positives.** For each `reply` concern:
    - `gh pr comment <pr_url> --body "<explanation>"` — threaded reply to the specific PR's review comment is preferred via `gh api` if needed, but a top-level comment works too.
 
-8. **Re-run relevant tests.** In each affected repo's worktree, run whatever tests the repo has per `/wizard` skill Phase 5. Do not push with failing tests.
+8. **Run the workspace pre-push gates.** In each affected repo's worktree: `bash $SORCERER_REPO/scripts/pre-push-gates.sh "<worktree>"`. Exit 0 = all clean. Non-zero = the failing gate's name and output are the last block printed; fix the underlying issue and re-run until clean. Same gates CI runs (fmt + clippy + build + test for Rust workspaces); skipping them here just guarantees another refer-back cycle.
 
 9. **Commit and push per affected repo.** Explicit file staging (not `git add -A`):
    ```bash
