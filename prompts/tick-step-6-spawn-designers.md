@@ -45,14 +45,16 @@ For each `active_architects` entry with `status: awaiting-tier-2`:
 
 2. Check concurrency: read `config.json:limits.max_concurrent_wizards` (default 3). Count entries with `status: running` across `active_architects + active_wizards`.
 
-3. **Cross-epic dependency helper.** Define `sub_epic_fully_merged(arch_id, sub_epic_name)` for use below. A sub-epic is "fully merged" when its designer has completed AND every issue in its manifest has a corresponding implement wizard whose status is `merged` or `archived`:
+3. **Cross-epic dependency helper.** Define `sub_epic_fully_merged(arch_id, sub_epic_name)` for use below. A sub-epic is "fully merged" when its designer has completed AND every issue in its manifest has a corresponding implement wizard whose status is in the terminal set `merged | archived | failed | blocked`:
 
    - Find the `active_wizards` entry with `mode: design`, `architect_id == arch_id`, and `sub_epic_name == <name>`.
      - If missing, or `manifest_file` is null, or status is not one of `completed | archived`: return **false** (the dep hasn't even finished designing).
    - Read that entry's `manifest_file`. For each issue in `manifest.issues`:
      - Find the `active_wizards` entry with `mode: implement` and `issue_linear_id == issue.linear_id` (fall back to `issue_key` match if needed).
-     - If missing, or status is not one of `merged | archived`: return **false**.
+     - If missing, or status is not one of `merged | archived | failed | blocked`: return **false**.
    - If every issue passed: return **true**.
+
+   **Why `failed | blocked` count as terminal here.** Both states indicate "no further sorcerer-side work without operator intervention" — `failed` means the wizard exited with an explicit failure marker; `blocked` means the coord paused work pending an external fix. In practice these often arrive via Linear `Duplicate` / `Cancelled` dispositions where the issue's intent is satisfied by other merged work. Including them as terminal lets the cross-epic dep gate advance once every sub-issue has reached *some* terminal state, instead of stalling indefinitely on cancelled-as-duplicate sub-issues. The strip-to-retry workflow is unaffected: a stripped (missing) entry still returns false, so the coord re-schedules. Operators wanting to retry a failed/blocked entry archive it first (still terminal), then optionally strip later.
 
 4. For each `sub_epic` at index `i` in the list:
    - **Skip if already spawned.** If any `active_wizards` entry matches `architect_id == <arch-id>` and `sub_epic_name == <name>`, move on (re-entry safety).
