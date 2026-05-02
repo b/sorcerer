@@ -325,7 +325,7 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
      ```
    - **Spawn the feedback wizard** (detached):
      ```bash
-     nohup bash scripts/spawn-wizard.sh feedback \
+     nohup bash "$SORCERER_REPO/scripts/spawn-wizard.sh" feedback \
        --wizard-id <wizard-id-same-as-implement> \
        --issue-meta-file <state_dir>/meta.json \
        > <state_dir>/logs/feedback-<N>.txt 2>&1 &
@@ -351,7 +351,7 @@ For each `active_wizards` entry with `mode: implement` and `status: awaiting-rev
      ```
    - **Spawn the rebase wizard** (detached):
      ```bash
-     nohup bash scripts/spawn-wizard.sh rebase \
+     nohup bash "$SORCERER_REPO/scripts/spawn-wizard.sh" rebase \
        --wizard-id <wizard-id-same-as-implement> \
        --issue-meta-file <state_dir>/meta.json \
        > <state_dir>/logs/rebase-<N>.txt 2>&1 &
