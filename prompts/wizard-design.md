@@ -23,6 +23,7 @@ Read your context file at `$SORCERER_CONTEXT_FILE` (JSON). Required fields for d
 - `state_dir` — where to write `manifest.json`
 - `heartbeat_file` — touch periodically
 - `wizard_id` — your UUID (used in the manifest only; do NOT apply it as a Linear label)
+- `epic_linear_id` — Linear identifier (e.g. `SOR-123`) of the architect's epic parent issue, or `null`. When non-null, every `save_issue` call you make MUST pass `parentId=<this value>` so the sub-task issues nest under the epic and Linear's UI auto-renders the epic's progress as the sub-tasks complete.
 
 Also read these from disk:
 - The project's `config.json` (at `<project-root>/.sorcerer/config.json`, typically two levels up from `state_dir`) — for:
@@ -36,6 +37,7 @@ Also read these from disk:
 Via `mcp__plugin_linear_linear__save_issue`, one call per issue:
 - `team`: the team UUID
 - `project`: the umbrella project UUID from `config.json:linear.project_uuid`. MANDATORY — issues roll up under the umbrella, and downstream filters (`has-linear-work.sh`, step-7 sweeper, design-review consistency) key off this.
+- `parentId`: when `epic_linear_id` from your context is non-null, pass it here. Linear nests this sub-task under the architect's epic parent and the epic's progress bar updates automatically as sub-tasks complete. When `epic_linear_id` is null (e.g. legacy architect entries from before SOR-536 landed), omit `parentId`.
 - `title`: clear, action-oriented
 - `description`: per the template below
 - `labels`: omit. Do NOT pass any `labels`.
@@ -111,7 +113,7 @@ Write to `<state_dir>/manifest.json.tmp`, then `bash -c 'jq . "<state_dir>/manif
    - Touch the heartbeat after each repo.
 6. **Reason about the mandate.** Decompose into atomically-mergeable issues with explicit acceptance criteria. Identify which repos each issue touches, any merge ordering, any inter-issue dependencies.
 7. **Touch heartbeat.**
-8. **Create each Linear issue** via `mcp__plugin_linear_linear__save_issue`. Pass `project=<config.json:linear.project_uuid>` on every call. Do NOT pass any `labels`. **Do NOT pass `blockedBy` / `blocks`** — at create time, dependent issues don't exist yet; native relations are populated in the next step. Capture the response's `id` (e.g. `SOR-42`).
+8. **Create each Linear issue** via `mcp__plugin_linear_linear__save_issue`. Pass `project=<config.json:linear.project_uuid>` on every call. When the context's `epic_linear_id` is non-null, also pass `parentId=<epic_linear_id>` on every call. Do NOT pass any `labels`. **Do NOT pass `blockedBy` / `blocks`** — at create time, dependent issues don't exist yet; native relations are populated in the next step. Capture the response's `id` (e.g. `SOR-42`).
 9. **Touch heartbeat.**
 9.5. **Populate native Linear blocks/blocked-by relations from the manifest's `depends_on`.** This is what makes the dep graph visible in Linear's UI (the Relations panel on each issue). For every issue in your in-memory list whose `depends_on` is non-empty:
     ```

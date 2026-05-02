@@ -424,6 +424,29 @@ Otherwise emit `tick: step-5d/5e — no review-wizard work this tick` and procee
 
 For each `active_architects` entry with `status: awaiting-tier-2`:
 
+0. **Ensure Linear epic parent exists.** If the architect entry's `epic_linear_id` is null:
+
+   - Read `.sorcerer/architects/<arch-id>/request.md` for the title seed; use the first non-empty line, stripped of leading `#` chars and limited to ~80 chars.
+   - Read `.sorcerer/architects/<arch-id>/design.md` for the description (first ~500 chars of the **Goal** section, plus a bulleted list of `plan.json:sub_epics[].name`). If `design.md` is missing, fall back to a 1-line summary derived from request.md.
+   - Read `<project-root>/.sorcerer/config.json:linear.project_uuid` for the target project.
+   - Call `mcp__plugin_linear_linear__save_issue` once with:
+     - `title`: `Epic: <derived title>`
+     - `description`: the markdown body composed above, ending with a footer line `<!-- sorcerer architect <arch-id-short> -->` so this epic is identifiable as architect-emitted.
+     - `project`: `<config.json:linear.project_uuid>`
+     - `state`: `"In Progress"`
+     - `labels`: omit.
+     - **Do NOT pass `parentId`** — epics are top-level.
+   - Capture the response's `id` (e.g. `SOR-540`).
+   - Update the architect entry: `epic_linear_id: "<id>"`. Atomic write of `sorcerer.json`.
+   - Append event:
+     ```json
+     {"ts":"...","event":"epic-issue-filed","architect_id":"<arch-id>","epic_linear_id":"<id>"}
+     ```
+
+   If `epic_linear_id` is already non-null, skip — idempotent re-entry (this step runs every tick the architect is in `awaiting-tier-2`, but does work only once).
+
+   On any `save_issue` failure: append an `epic-file-failed` escalation with `rule: epic-file-failed`, leave `epic_linear_id` null, and proceed with designer spawn anyway. Designers tolerate `epic_linear_id: null` (they fall back to no `parentId`); the epic can be created retroactively on a later tick.
+
 1. Read `.sorcerer/architects/<arch-id>/plan.json`. Parse `sub_epics` (list of objects with `name`, `mandate`, `repos`, `explorable_repos`, optional `depends_on`).
 
 2. Check concurrency: read `config.json:limits.max_concurrent_wizards` (default 3). Count entries with `status: running` across `active_architects + active_wizards`.
@@ -447,12 +470,13 @@ For each `active_architects` entry with `status: awaiting-tier-2`:
      - Otherwise:
        - Generate UUID: `uuidgen`.
        - `mkdir -p .sorcerer/wizards/<wizard-id>/logs`.
-       - Spawn the designer:
+       - Spawn the designer. Pass `--epic-linear-id` when the architect entry's `epic_linear_id` is non-null so the designer's `save_issue` calls set `parentId` on each sub-task. If null (step-0 above failed transiently), omit the flag — the designer falls back to no `parentId` and the epic-file step will retry next tick.
          ```bash
          nohup bash "$SORCERER_REPO/scripts/spawn-wizard.sh" design \
            --wizard-id <wizard-id> \
            --architect-plan-file .sorcerer/architects/<arch-id>/plan.json \
            --sub-epic-index <i> \
+           ${epic_linear_id:+--epic-linear-id "$epic_linear_id"} \
            > .sorcerer/wizards/<wizard-id>/logs/spawn.txt 2>&1 &
          echo $!
          ```
@@ -467,7 +491,7 @@ For each `active_architects` entry with `status: awaiting-tier-2`:
            "architect_id": "<arch-id>",
            "sub_epic_index": <i>,
            "sub_epic_name": "<name from sub_epic>",
-           "epic_linear_id": null,
+           "epic_linear_id": "<copied from architect entry, or null>",
            "manifest_file": null,
            "pid": <pid>,
            "respawn_count": 0

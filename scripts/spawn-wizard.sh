@@ -21,6 +21,9 @@
 #   --request-file <path>            request markdown (required for architect)
 #   --architect-plan-file <path>     architect's plan.json (required for design)
 #   --sub-epic-index <int>           which sub-epic in the plan (required for design)
+#   --epic-linear-id <id>            Linear epic parent issue id (optional, design mode);
+#                                    designer wizard sets parentId=<id> on every save_issue
+#                                    so sub-tasks roll up under the architect's epic
 #   --issue-meta-file <path>         per-issue meta.json (required for implement/feedback);
 #                                    its parent dir is the wizard's state_dir
 #   --state-dir <path>               override the default state_dir computation
@@ -68,6 +71,7 @@ SUBJECT_STATE_DIR=""
 SUBJECT_ID=""
 ISSUE_META_FILE=""
 STATE_DIR_OVERRIDE=""
+EPIC_LINEAR_ID=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --request-file)
@@ -106,6 +110,9 @@ while [[ $# -gt 0 ]]; do
     --state-dir)
       [[ $# -ge 2 ]] || { echo "ERROR: --state-dir requires a value" >&2; exit 2; }
       STATE_DIR_OVERRIDE="$2"; shift 2 ;;
+    --epic-linear-id)
+      [[ $# -ge 2 ]] || { echo "ERROR: --epic-linear-id requires a value" >&2; exit 2; }
+      EPIC_LINEAR_ID="$2"; shift 2 ;;
     *) echo "ERROR: unknown flag $1" >&2; exit 2 ;;
   esac
 done
@@ -256,6 +263,7 @@ case "$MODE" in
       --arg architect_plan_file "$ARCHITECT_PLAN_FILE_ABS" \
       --arg request_file "$ARCH_DIR/request.md" \
       --arg bare_clones_dir "$BARE_CLONES_DIR" \
+      --arg epic_linear_id "$EPIC_LINEAR_ID" \
       --argjson sub_epic_index "$SUB_EPIC_INDEX" \
       --argjson max_refer_back_cycles "$MAX_REFER" \
       --slurpfile plan "$ARCHITECT_PLAN_FILE" \
@@ -271,7 +279,8 @@ case "$MODE" in
         request_file:$request_file,
         repos: ($se.repos // []),
         explorable_repos: ($se.explorable_repos // []),
-        bare_clones_dir:$bare_clones_dir
+        bare_clones_dir:$bare_clones_dir,
+        epic_linear_id: (if $epic_linear_id == "" then null else $epic_linear_id end)
       }' \
       > "$CONTEXT_FILE"
     ;;
